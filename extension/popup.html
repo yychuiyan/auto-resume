@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:360px;font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:10px;font-size:12px}
+.card{background:#16213e;border-radius:8px;padding:10px;margin-bottom:8px}
+.ttl{font-size:11px;color:#888;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.btn{width:100%;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;color:#fff;background:linear-gradient(135deg,#667eea,#764ba2)}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.zp{background:linear-gradient(135deg,#f093fb,#f5576c)}
+.row{display:flex;gap:6px;align-items:center;margin-top:6px}
+.row input{width:44px;text-align:center;padding:4px;background:#0f0f23;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:11px}
+.row label{color:#888;font-size:11px}
+textarea{width:100%;padding:6px;background:#0f0f23;border:1px solid #333;border-radius:6px;color:#e0e0e0;font-size:11px;resize:vertical;font-family:inherit;height:52px;margin-top:6px}
+.prog{display:none;margin-top:6px}
+.bar{height:4px;background:#333;border-radius:3px;margin-top:4px;overflow:hidden}
+.fill{height:100%;border-radius:3px;width:0;transition:width .3s}
+.boss .fill{background:linear-gradient(90deg,#667eea,#764ba2)}
+.zp .fill{background:linear-gradient(90deg,#f093fb,#f5576c)}
+.st{font-size:11px;margin-top:3px}.ok{color:#4ade80}.er{color:#f87171}
+.info{font-size:11px;color:#888;margin-top:4px;min-height:16px}
+.joblist{margin-top:6px;max-height:200px;overflow-y:auto;display:none;font-size:11px;line-height:1.6}
+.toolbar{display:flex;gap:4px;margin-top:4px}
+.toolbar button{flex:1;padding:3px 6px;border:1px solid #333;border-radius:4px;background:transparent;color:#666;font-size:10px;cursor:pointer}
+.toolbar button:hover{color:#aaa;border-color:#555}
+
+.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tab{flex:1;padding:7px 0;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;text-align:center;background:#16213e;color:#888;transition:all .2s}
+.tab.boss.active{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
+.tab.zp.active{background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff}
+.tab.job51.active{background:linear-gradient(135deg,#43e97b,#38f9d7);color:#1a1a2e}
+.tabcnt{font-size:9px;font-weight:400;opacity:.7;margin-top:1px}
+.panel{display:none}
+.panel.active{display:block}
+.panel.active.boss .fill{background:linear-gradient(90deg,#667eea,#764ba2)}
+.panel.active.zp .fill{background:linear-gradient(90deg,#f093fb,#f5576c)}
+.panel.active.job51 .fill{background:linear-gradient(90deg,#43e97b,#38f9d7)}
+.btn.green{background:linear-gradient(135deg,#43e97b,#38f9d7);color:#1a1a2e}
+</style></head><body>
+<div class="tabs">
+  <button class="tab boss active" id="tabBoss"><div>🔵 BOSS</div><div class="tabcnt" id="cntBoss">0</div></button>
+  <button class="tab zp" id="tabZhaopin"><div>🔴 智联</div><div class="tabcnt" id="cntZp">0</div></button>
+  <button class="tab job51" id="tab51"><div>🟢 前程无忧</div><div class="tabcnt" id="cnt51">0</div></button>
+</div>
+
+<!-- ========== BOSS ========== -->
+<div class="panel active boss" id="panelBoss">
+  <div class="card">
+    <div class="ttl">📌 第1步 — 抓取职位</div>
+    <button class="btn" id="btnFetch">🔍 从搜索页抓取职位</button>
+    <div class="info" id="fetchInfo"></div>
+    <div class="joblist" id="jobList"></div>
+  </div>
+  <div class="card" id="cfg" style="display:none">
+    <div class="ttl">⚙️ 第2步 — 批量打招呼</div>
+    <div class="row">
+      <label>数量</label><input id="cnt" type="number" value="5" min="1"><label>个/共 <b id="total">0</b> 个</label>
+    </div>
+    <div class="row">
+      <label>间隔</label><input id="min" type="number" value="3" min="2"><label>~</label><input id="max" type="number" value="5" min="3"><label>秒</label>
+    </div>
+    <button class="btn" id="btnStart">🚀 开始批量打招呼</button>
+    <div class="prog" id="prog">
+      <div class="bar"><div class="fill" id="pfill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px">
+        <span id="ptxt" style="font-size:10px;color:#888"></span>
+        <span class="st" id="pst"></span>
+      </div>
+    </div>
+  </div>
+  <div class="toolbar">
+    <button id="bProbe">🔬 诊断</button>
+    <button id="bCancel" style="display:none;color:#f87171;border-color:#f87171">⏹ 取消</button>
+    <button class="clear-log">🗑 清除日志</button>
+  </div>
+</div>
+
+<!-- ========== 智联 ========== -->
+<div class="panel zp" id="panelZhaopin">
+  <div class="card">
+    <div class="ttl">📌 第1步 — 抓取职位</div>
+    <button class="btn zp" id="zFetch">🔍 从搜索页抓取职位</button>
+    <div class="info" id="zFetchInfo"></div>
+    <div class="joblist" id="zJobList"></div>
+  </div>
+  <div class="card" id="zCfg" style="display:none">
+    <div class="ttl">⚙️ 第2步 — 批量投递</div>
+    <div class="row">
+      <label>数量</label><input id="zCnt" type="number" value="5" min="1"><label>个/共 <b id="zTotal">0</b> 个</label>
+    </div>
+    <div class="row">
+      <label>间隔</label><input id="zMin" type="number" value="3" min="2"><label>~</label><input id="zMax" type="number" value="5" min="3"><label>秒</label>
+    </div>
+    <button class="btn zp" id="zStart">🚀 开始批量投递</button>
+    <div class="prog" id="zProg">
+      <div class="bar"><div class="fill" id="zPfill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px">
+        <span id="zPtxt" style="font-size:10px;color:#888"></span>
+        <span class="st" id="zPst"></span>
+      </div>
+    </div>
+  </div>
+  <div class="toolbar">
+    <button id="zProbe">🔬 诊断</button>
+    <button id="zCancel" style="display:none;color:#f87171;border-color:#f87171">⏹ 取消</button>
+    <button class="clear-log">🗑 清除日志</button>
+  </div>
+</div>
+
+<!-- ========== 前程无忧 ========== -->
+<div class="panel job51" id="panel51">
+  <div class="card">
+    <div class="ttl">📌 第1步 — 抓取职位</div>
+    <button class="btn green" id="wFetch">🔍 从搜索页抓取职位</button>
+    <div class="info" id="wFetchInfo"></div>
+    <div class="joblist" id="wJobList"></div>
+  </div>
+  <div class="card" id="wCfg" style="display:none">
+    <div class="ttl">⚙️ 第2步 — 批量投递</div>
+    <div class="row"><label>数量</label><input id="wCnt" type="number" value="5" min="1"><label>个/共 <b id="wTotal">0</b> 个</label></div>
+    <div class="row"><label>间隔</label><input id="wMin" type="number" value="3" min="2"><label>~</label><input id="wMax" type="number" value="5" min="3"><label>秒</label></div>
+    <button class="btn green" id="wStart">🚀 开始批量投递</button>
+    <div class="prog" id="wProg">
+      <div class="bar"><div class="fill" id="wPfill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px">
+        <span id="wPtxt" style="font-size:10px;color:#888"></span>
+        <span class="st" id="wPst"></span>
+      </div>
+    </div>
+  </div>
+  <div class="toolbar">
+    <button id="wProbe">🔬 诊断</button>
+    <button id="wCancel" style="display:none;color:#f87171;border-color:#f87171">⏹ 取消</button>
+    <button class="clear-log">🗑 清除日志</button>
+  </div>
+</div>
+
+<!-- 共享日志 -->
+<div class="log" id="log" style="
+background:#0f0f23;border-radius:8px;padding:8px;margin-top:8px;
+max-height:160px;overflow-y:auto;font-family:monospace;font-size:10px;
+line-height:1.6;color:#888"></div>
+<script src="popup.js"></script>
+</body></html>

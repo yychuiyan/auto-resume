@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "招聘平台批量投递",
+  "version": "1.0",
+  "description": "BOSS/智联/同城无忧 批量投递",
+  "permissions": ["storage", "tabs", "scripting", "cookies", "notifications"],
+  "background": { "service_worker": "background.js" },
+  "host_permissions": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*", "*://*.51job.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://*.zhipin.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.zhaopin.com/*"],
+      "js": ["zcontent.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.51job.com/*"],
+      "js": ["wcontent.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js", "zinject.js", "winject.js"],
+      "matches": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*", "*://*.51job.com/*"]
+    }
+  ],
+  "action": { "default_popup": "popup.html" }
+}

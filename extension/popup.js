@@ -30,23 +30,21 @@ function replayLogs(logs) {
 function showCancel(id) { const b = document.getElementById(id); if (b) b.style.display = ''; }
 function hideCancel(id) { const b = document.getElementById(id); if (b) b.style.display = 'none'; }
 
-let countBoss = 0, countZp = 0, count51 = 0;
+let countBoss = 0, countZp = 0;
 const today = new Date().toISOString().substring(0, 10);
 
 function addCount(platform, n) {
   const key = platform + '_cnt_' + today;
   if (platform === 'boss') countBoss += n;
   else if (platform === 'zp') countZp += n;
-  else count51 += n;
-  chrome.storage.local.set({ [key]: platform === 'boss' ? countBoss : platform === 'zp' ? countZp : count51 });
+  chrome.storage.local.set({ [key]: platform === 'boss' ? countBoss : countZp });
   updateCountDisplay();
 }
 
 function updateCountDisplay() {
-  const b = document.getElementById('cntBoss'), z = document.getElementById('cntZp'), w = document.getElementById('cnt51');
+  const b = document.getElementById('cntBoss'), z = document.getElementById('cntZp');
   if (b) b.textContent = countBoss;
   if (z) z.textContent = countZp;
-  if (w) w.textContent = count51;
 }
 
 function saveSession(platform, data) {
@@ -87,20 +85,16 @@ function renderZpList(jobs) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const s = await chrome.storage.local.get(['boss_cnt_' + today, 'zp_cnt_' + today, 'w51_cnt_' + today]);
+  const s = await chrome.storage.local.get(['boss_cnt_' + today, 'zp_cnt_' + today]);
   countBoss = s['boss_cnt_' + today] || 0;
   countZp = s['zp_cnt_' + today] || 0;
-  count51 = s['w51_cnt_' + today] || 0;
   updateCountDisplay();
 
   // 根据当前页面自动切Tab
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const url = tabs[0]?.url || '';
-  let activePlatform = '';
-  if (url.includes('zhipin.com')) activePlatform = 'boss';
-  else if (url.includes('zhaopin.com')) activePlatform = 'zhaopin';
-  else if (url.includes('51job.com')) activePlatform = 'job51';
-  if (activePlatform) switchTab(activePlatform);
+  if (url.includes('zhipin.com')) switchTab('boss');
+  else if (url.includes('zhaopin.com')) switchTab('zhaopin');
 
   // 恢复今日会话（两边都恢复，列表始终显示）
   const bossData = await restoreSession('boss');
@@ -148,7 +142,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const finalZp = await restoreSession('zp');
 
   // 恢复当前Tab日志
-  const curData = (activePlatform === 'zp' ? finalZp : finalBoss);
+  const curData = (activeTab === 'zhaopin' ? finalZp : finalBoss);
   if (curData && curData.logs && curData.logs.length) { sessionLogs = curData.logs; replayLogs(curData.logs); }
   // === Tab 切换 ===
   document.getElementById('tabBoss').addEventListener('click', () => switchTab('boss'));
@@ -165,21 +159,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('zProbe').addEventListener('click', zProbe);
   document.getElementById('zCancel').addEventListener('click', () => { chrome.storage.local.set({ zp_cancel: true }); err('⏹ 取消中...'); });
 
-  // 前程无忧
-  document.getElementById('tab51').addEventListener('click', () => switchTab('job51'));
-  document.getElementById('wProbe').addEventListener('click', wProbe);
-  document.getElementById('wFetch').addEventListener('click', wFetch);
-  document.getElementById('wStart').addEventListener('click', wStartBatch);
-  document.getElementById('wCancel').addEventListener('click', () => { chrome.storage.local.set({ w51_cancel: true }); err('⏹ 取消中...'); });
-
   // 清除日志按钮
   document.querySelectorAll('.clear-log').forEach(b => {
     b.addEventListener('click', () => {
       document.getElementById('log').innerHTML = '';
       sessionLogs = [];
       // 同时清除当前Tab的session日志
-      const p = activeTab === 'job51' ? 'w51' : activeTab;
-      saveSession(p, { jobs: p === 'boss' ? allJobs : p === 'zp' ? zAllJobs : wAllJobs, fetchTime: Date.now() });
+      saveSession(activeTab, { jobs: activeTab === 'boss' ? allJobs : zAllJobs, fetchTime: Date.now() });
     });
   });
 
@@ -189,15 +175,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 let activeTab = 'boss';
 
 function switchTab(platform) {
+  // 切走前保存当前Tab日志
+  if (activeTab !== platform) {
+    saveSession(activeTab, { jobs: activeTab === 'boss' ? allJobs : zAllJobs, fetchTime: Date.now() });
+  }
   activeTab = platform;
   document.getElementById('tabBoss').classList.toggle('active', platform === 'boss');
   document.getElementById('tabZhaopin').classList.toggle('active', platform === 'zhaopin');
-  document.getElementById('tab51').classList.toggle('active', platform === 'job51');
   document.getElementById('panelBoss').classList.toggle('active', platform === 'boss');
   document.getElementById('panelZhaopin').classList.toggle('active', platform === 'zhaopin');
-  document.getElementById('panel51').classList.toggle('active', platform === 'job51');
-  const p = platform === 'job51' ? 'w51' : platform;
-  restoreSession(p).then(data => {
+  // 恢复目标Tab日志
+  restoreSession(platform).then(data => {
     if (data && data.logs) { sessionLogs = data.logs; replayLogs(data.logs); }
     else { document.getElementById('log').innerHTML = ''; sessionLogs = []; }
   });
@@ -392,10 +380,9 @@ function pollProgress(platform) {
       if (!p.running) { clearInterval(timer); zIsRunning = false; document.getElementById('zStart').disabled = false; hideCancel('zCancel'); saveSession('zp', { jobs: zAllJobs, okC: p.okC, failC: p.failC, batchDone: true, min: parseInt(document.getElementById('zMin').value)||3, max: parseInt(document.getElementById('zMax').value)||5, fetchTime: Date.now() }); }
     }
     const today = new Date().toISOString().substring(0, 10);
-    const cnt = await chrome.storage.local.get(['boss_cnt_' + today, 'zp_cnt_' + today, 'w51_cnt_' + today]);
+    const cnt = await chrome.storage.local.get(['boss_cnt_' + today, 'zp_cnt_' + today]);
     countBoss = cnt['boss_cnt_' + today] || 0;
     countZp = cnt['zp_cnt_' + today] || 0;
-    count51 = cnt['w51_cnt_' + today] || 0;
     updateCountDisplay();
   }, 500);
 }
@@ -797,100 +784,3 @@ function zWaitResult(cmdId, timeout) {
     check();
   });
 }
-
-// ==================== 前程无忧 ====================
-let wIsRunning = false, wAllJobs = [];
-
-async function wProbe() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
-  if (!tab.url?.includes('51job.com')) { info('请切换到前程无忧搜索页'); return; }
-  const btn = document.getElementById('wProbe'); btn.textContent = '⏳...'; btn.disabled = true;
-  const res = await chrome.scripting.executeScript({
-    target: { tabId: tab.id }, world: 'MAIN',
-    func: () => {
-      if (!window.__w51p) { window.__w51p=true; window.__w51c=[]; const o=window.fetch; window.fetch=function(...a){const u=typeof a[0]==='string'?a[0]:a[0]?.url||'';const h={};if(a[1]&&a[1].headers)try{new Headers(a[1].headers).forEach((v,k)=>{h[k]=v.substring(0,100);});}catch(_){}window.__w51c.push({url:u.substring(0,350),headers:h});return o.apply(this,a);}; const x=XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open=function(m,u){window.__w51c.push({method:m,url:u.substring(0,350)});return x.apply(this,arguments);}; const s=XMLHttpRequest.prototype.send; XMLHttpRequest.prototype.send=function(b){if(b&&typeof b==='string'){const l=window.__w51c[window.__w51c.length-1];if(l)l.body=b.substring(0,1200);}return s.apply(this,arguments);}; }
-      const raw=window.__w51c||[]; window.__w51c=[];
-      // 搜全局apply相关函数
-      const globals=[];
-      for(const k of Object.keys(window).filter(k=>/apply|deliver|send|resume|job/i.test(k))){try{globals.push(k+':'+typeof window[k]);}catch(_){}}
-      const card0=document.querySelector('.joblist-item'); const btns=[];
-      if(card0){for(const b of card0.querySelectorAll('button,a,[class*=btn],[class*=apply],[class*=deliver],[class*=send]')){btns.push({tag:b.tagName,class:(b.className||'').substring(0,60),text:(b.textContent||'').trim().substring(0,30),href:b.href||''});}}
-      // 找距离优先弹窗的class
-      const dists=[]; for(const e of document.querySelectorAll('*')){if(e.children.length===0&&e.textContent&&e.textContent.includes('距离优先')){let p=e;for(let i=0;i<5&&p;i++){dists.push(p.tagName+'.'+((p.className||'')+'').substring(0,60));p=p.parentElement;}break;}}
-      return {captured:raw.slice(-10).map(c=>({method:c.method||'GET',url:c.url,headers:c.headers||{},body:c.body||''})),cards:document.querySelectorAll('.joblist-item,.job_item,[class*=joblist] [class*=item]').length,cardBtns:btns.slice(0,10),distancePopup:dists};
-    },
-  });
-  const d=(res&&res[0]?.result)||{}; info('51探测: cards='+d.cards+' globals='+JSON.stringify(d.globals).substring(0,400)+' btns='+JSON.stringify(d.cardBtns).substring(0,400)); if(d.captured&&d.captured.length)info('51api: '+JSON.stringify(d.captured.filter(c=>c.body)).substring(0,1500));
-  btn.textContent='🔬 诊断'; btn.disabled=false;
-}
-
-async function wFetch() {
-  const tabs=await chrome.tabs.query({active:true,currentWindow:true}); const tab=tabs[0];
-  if(!tab.url?.includes('51job.com')){document.getElementById('wFetchInfo').textContent='请切换到前程无忧搜索页';return;}
-  const btn=document.getElementById('wFetch'); btn.disabled=true; btn.textContent='⏳ 抓取...';
-  const res=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>{
-    const jobs=[]; const seen=new Set(); let aid='';
-    // 多来源搜accountId: HTML → script → localStorage → cookie → 全局变量
-    const allText=document.documentElement.outerHTML;
-    let am=allText.match(/(?:accountId|accId|account_id|accKid)[^0-9]*(\d{6,})/i);
-    if(!am){for(const s of document.querySelectorAll('script')){am=(s.textContent||'').match(/(?:accountId|accId)[^0-9]*(\d{6,})/i);if(am)break;}}
-    if(!am){try{const v=localStorage.getItem('accountId')||localStorage.getItem('accId');if(v)am=[null,v];}catch(_){}}
-    if(!am){try{if(window.accountId)am=[null,window.accountId];if(window._accountId)am=[null,window._accountId];}catch(_){}}
-    if(am)aid=am[1];
-    for(const card of document.querySelectorAll('.joblist-item')){
-      const ch=card.outerHTML; const jm=ch.match(/jobid[=:"]+(\d+)/i)||ch.match(/jobId[^0-9]*(\d+)/); const tm=ch.match(/jobType[^0-9]*(\d+)/i); const am2=ch.match(/adId[^0-9]*(\d+)/i);
-      const link=card.querySelector('a[href]'); const href=link?link.href:''; if(!href||seen.has(href))continue; seen.add(href);
-      const name=(card.querySelector('[class*=job],[class*=title],[class*=name],h3,.t')?.textContent||link?.textContent||'').trim().substring(0,50);
-      const co=(card.querySelector('[class*=company],[class*=corp],[class*=cname],.c')?.textContent||'').trim().substring(0,30);
-      const info=(card.querySelector('[class*=salary],[class*=location],[class*=city]')?.textContent||'').trim().substring(0,40);
-      jobs.push({url:href,name:name||'(无标题)',company:co,info,jobId:jm?jm[1]:'',jobType:tm?tm[1]:'0',adId:am2?am2[1]:''});
-    }
-    return {jobs,accountId:aid};
-  }});
-  const raw=(res&&res[0]?.result)||{}; wAllJobs=raw.jobs||[];
-  let aid=raw.accountId||'';
-  // 从cookie兜底提取accountId
-  if(!aid){const cks=await chrome.cookies.getAll({domain:'.51job.com'});const ac=cks.find(c=>c.name==='accountId'||c.name==='acckid');if(ac)aid=ac.value;}
-  window._w51Aid=aid;
-  info('51抓取 '+wAllJobs.length+' 个, aid='+(aid||'?'));
-  document.getElementById('wFetchInfo').textContent='✅ '+wAllJobs.length+' 个';
-  const jl=document.getElementById('wJobList');
-  if(wAllJobs.length){jl.innerHTML=wAllJobs.map((j,i)=>`<div style="padding:2px 0;border-bottom:1px solid #222;display:flex;gap:6px"><span style="color:#43e97b;flex-shrink:0">${i+1}.</span><div style="flex:1;min-width:0"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.name}</div>${j.company?`<div style="font-size:10px;color:#888">${j.company} ${j.info||''}</div>`:''}</div></div>`).join('');jl.style.display='block';}
-  document.getElementById('wTotal').textContent=wAllJobs.length; document.getElementById('wCnt').value=wAllJobs.length;
-  document.getElementById('wCfg').style.display=''; btn.textContent='🔍 重新抓取'; btn.disabled=false;
-  saveSession('w51',{jobs:wAllJobs,min:3,max:5,fetchTime:Date.now()});
-}
-
-async function wStartBatch(){
-  if(wIsRunning||!wAllJobs.length)return;
-  const cnt=Math.min(parseInt(document.getElementById('wCnt').value)||wAllJobs.length,wAllJobs.length);
-  const jobs=wAllJobs.slice(0,cnt); const aid=window._w51Aid||'';
-  if(!aid){info('未找到accountId');return;}
-  const minInt=parseInt(document.getElementById('wMin').value)||3,maxInt=parseInt(document.getElementById('wMax').value)||5;
-  await chrome.storage.local.remove('w51_cancel'); wIsRunning=true;
-  document.getElementById('wStart').disabled=true; document.getElementById('wProg').style.display=''; showCancel('wCancel');
-  sessionLogs=[]; let okC=0,failC=0;
-  const l=(m,c)=>{const t=new Date().toLocaleTimeString('zh-CN',{hour12:false});sessionLogs.push({t,msg:m,color:c||'#888'});const el=document.getElementById('log');if(el){const d=document.createElement('div');d.innerHTML=`<span style="color:#555">${t}</span> <span style="color:${c||'#888'}">${escHtml(m)}</span>`;el.appendChild(d);el.scrollTop=el.scrollHeight;}};
-  l('=== 51开始 '+jobs.length+' 个 ===','#8b949e');
-  for(let i=0;i<jobs.length;i++){
-    const cs=await chrome.storage.local.get('w51_cancel'); if(cs.w51_cancel){l('⏹ 已取消','#f87171');await chrome.storage.local.remove('w51_cancel');break;}
-    const j=jobs[i],idx=i+1; if(!j.jobId){failC++;l('['+idx+'] ❌ 缺jobId','#f87171');continue;}
-    document.getElementById('wPst').textContent='['+idx+'/'+jobs.length+'] '+j.name;
-    document.getElementById('wPfill').style.width=Math.round(idx/jobs.length*100)+'%';
-    const cmdId=Date.now()+'_w'+idx;
-    await chrome.storage.local.set({wcmd:{type:'apply',id:cmdId,accountId:aid,jobId:j.jobId,jobType:j.jobType||'0',adId:j.adId||''}});
-    const result=await wWaitResult(cmdId,20000);
-    if(!result){failC++;l('['+idx+'] ❌ 超时','#f87171');}
-    else if(result.ok){okC++;l('['+idx+'] ✅ 立即沟通 | '+result.msg,'#4ade80');addCount('w51',1);}
-    else{failC++;l('['+idx+'] ❌ 立即沟通 | '+result.msg,'#f87171');}
-    document.getElementById('wPtxt').textContent='进度 '+idx+'/'+jobs.length+'（'+okC+'✅/'+failC+'❌）';
-    if(i<jobs.length-1){const delay=minInt+Math.floor(Math.random()*(maxInt-minInt+1));document.getElementById('wPst').textContent='等 '+delay+'s...';for(let d=0;d<delay*2;d++){await new Promise(r=>setTimeout(r,500));const cs=await chrome.storage.local.get('w51_cancel');if(cs.w51_cancel)break;}}
-  }
-  l('=== '+okC+'成功 / '+failC+'失败 ===','#8b949e'); wIsRunning=false;
-  document.getElementById('wStart').disabled=false; hideCancel('wCancel');
-  saveSession('w51',{jobs:wAllJobs,okC,failC,batchDone:true,min:minInt,max:maxInt,fetchTime:Date.now()});
-}
-
-function wWaitResult(cmdId,timeout){return new Promise(resolve=>{const start=Date.now();const check=async()=>{const s=await chrome.storage.local.get('wresult');if(s.wresult?.id===cmdId){await chrome.storage.local.remove('wresult');resolve(s.wresult);return;}if(Date.now()-start>timeout){resolve(null);return;}setTimeout(check,300);};check();});}
-

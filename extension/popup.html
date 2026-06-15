@@ -28,19 +28,16 @@ textarea{width:100%;padding:6px;background:#0f0f23;border:1px solid #333;border-
 .tab{flex:1;padding:7px 0;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;text-align:center;background:#16213e;color:#888;transition:all .2s}
 .tab.boss.active{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
 .tab.zp.active{background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff}
-.tab.job51.active{background:linear-gradient(135deg,#43e97b,#38f9d7);color:#1a1a2e}
 .tabcnt{font-size:9px;font-weight:400;opacity:.7;margin-top:1px}
 .panel{display:none}
 .panel.active{display:block}
 .panel.active.boss .fill{background:linear-gradient(90deg,#667eea,#764ba2)}
 .panel.active.zp .fill{background:linear-gradient(90deg,#f093fb,#f5576c)}
-.panel.active.job51 .fill{background:linear-gradient(90deg,#43e97b,#38f9d7)}
-.btn.green{background:linear-gradient(135deg,#43e97b,#38f9d7);color:#1a1a2e}
 </style></head><body>
 <div class="tabs">
   <button class="tab boss active" id="tabBoss"><div>🔵 BOSS</div><div class="tabcnt" id="cntBoss">0</div></button>
   <button class="tab zp" id="tabZhaopin"><div>🔴 智联</div><div class="tabcnt" id="cntZp">0</div></button>
-  <button class="tab job51" id="tab51"><div>🟢 前程无忧</div><div class="tabcnt" id="cnt51">0</div></button>
+
 </div>
 
 <!-- ========== BOSS ========== -->
@@ -107,33 +104,6 @@ textarea{width:100%;padding:6px;background:#0f0f23;border:1px solid #333;border-
   </div>
 </div>
 
-<!-- ========== 前程无忧 ========== -->
-<div class="panel job51" id="panel51">
-  <div class="card">
-    <div class="ttl">📌 第1步 — 抓取职位</div>
-    <button class="btn green" id="wFetch">🔍 从搜索页抓取职位</button>
-    <div class="info" id="wFetchInfo"></div>
-    <div class="joblist" id="wJobList"></div>
-  </div>
-  <div class="card" id="wCfg" style="display:none">
-    <div class="ttl">⚙️ 第2步 — 批量投递</div>
-    <div class="row"><label>数量</label><input id="wCnt" type="number" value="5" min="1"><label>个/共 <b id="wTotal">0</b> 个</label></div>
-    <div class="row"><label>间隔</label><input id="wMin" type="number" value="3" min="2"><label>~</label><input id="wMax" type="number" value="5" min="3"><label>秒</label></div>
-    <button class="btn green" id="wStart">🚀 开始批量投递</button>
-    <div class="prog" id="wProg">
-      <div class="bar"><div class="fill" id="wPfill"></div></div>
-      <div style="display:flex;justify-content:space-between;margin-top:2px">
-        <span id="wPtxt" style="font-size:10px;color:#888"></span>
-        <span class="st" id="wPst"></span>
-      </div>
-    </div>
-  </div>
-  <div class="toolbar">
-    <button id="wProbe">🔬 诊断</button>
-    <button id="wCancel" style="display:none;color:#f87171;border-color:#f87171">⏹ 取消</button>
-    <button class="clear-log">🗑 清除日志</button>
-  </div>
-</div>
 
 <!-- 共享日志 -->
 <div class="log" id="log" style="

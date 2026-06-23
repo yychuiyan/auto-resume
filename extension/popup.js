@@ -731,27 +731,255 @@ async function zStartBatch() {
   const rt = cookies.find(c => c.name === 'rt')?.value || '';
   if (!at || !rt) { err('缺少 at/rt token'); return; }
 
-  // 从页面取 resumeNumber
+  // 从页面取 resumeNumber（多层兜底）
   const pageData = await chrome.scripting.executeScript({
     target: { tabId: zlTab.id }, world: 'MAIN',
     func: () => {
-      const d = {};
-      const html = document.documentElement.outerHTML;
-      let m = html.match(/resumeNumber["\s:=]+([A-Za-z0-9_]+)/);
-      if (!m) { for (const s of document.querySelectorAll('script')) { m = (s.textContent||'').match(/resumeNumber["\s:=]+([A-Za-z0-9_]+)/); if (m) break; } }
-      if (m && m[1].length > 10) d.resumeNumber = m[1];
+      const d = { _diag: [] };
+
+      // --- 策略1：正则搜 HTML 和 script（扩大变量名和值范围）---
+      const patterns = [
+        // 变量名          分隔符      值（放宽到含连字符、数字、字母）
+        /resumeNumber["'\s:=]+([A-Za-z0-9_-]+)/,
+        /resumeId["'\s:=]+([A-Za-z0-9_-]+)/,
+        /resumeCode["'\s:=]+([A-Za-z0-9_-]+)/,
+        /cvNumber["'\s:=]+([A-Za-z0-9_-]+)/,
+        /cvId["'\s:=]+([A-Za-z0-9_-]+)/,
+        /"resumeNumber"\s*:\s*"([^"]+)"/,
+        /"resumeId"\s*:\s*"([^"]+)"/,
+        /'resumeNumber'\s*:\s*'([^']+)'/,
+      ];
+
+      const allText = document.documentElement.outerHTML;
+      for (const re of patterns) {
+        let m = allText.match(re);
+        if (m && m[1] && m[1].length > 3) {
+          d.resumeNumber = m[1];
+          d._src = 'html_re:' + re.source.substring(0, 40);
+          break;
+        }
+      }
+
+      // 单独搜 script 标签（有些脚本内容不在 outerHTML 中）
+      if (!d.resumeNumber) {
+        for (const s of document.querySelectorAll('script')) {
+          const t = s.textContent || '';
+          if (!t || t.length < 50) continue;
+          for (const re of patterns) {
+            const m = t.match(re);
+            if (m && m[1] && m[1].length > 3) {
+              d.resumeNumber = m[1];
+              d._src = 'script_re:' + re.source.substring(0, 40);
+              break;
+            }
+          }
+          if (d.resumeNumber) break;
+        }
+      }
+
+      // --- 策略2：localStorage / sessionStorage ---
+      if (!d.resumeNumber) {
+        for (const store of [localStorage, sessionStorage]) {
+          try {
+            for (let i = 0; i < store.length; i++) {
+              const k = store.key(i);
+              if (!k) continue;
+              const v = store.getItem(k) || '';
+              // 找 key 名含 resume 的
+              if (/resume|resumeNumber|resumeId|cvNumber/i.test(k) && v.length > 3) {
+                // 尝试解析 JSON
+                try {
+                  const parsed = JSON.parse(v);
+                  const rn = parsed.resumeNumber || parsed.resumeId || parsed.resumeCode
+                    || parsed.cvNumber || parsed.cvId || parsed.number || parsed.id || '';
+                  if (rn && rn.length > 3) {
+                    d.resumeNumber = String(rn);
+                    d._src = 'ls_json:' + k;
+                    break;
+                  }
+                } catch (_) {
+                  if (v.length > 3 && v.length < 200) {
+                    d.resumeNumber = v;
+                    d._src = 'ls_raw:' + k;
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+          if (d.resumeNumber) break;
+        }
+      }
+
+      // --- 策略3：window 全局对象（__INITIAL_STATE__, __NUXT__, __NEXT_DATA__ 等）---
+      if (!d.resumeNumber) {
+        const globalKeys = ['__INITIAL_STATE__', '__NUXT__', '__NEXT_DATA__', '__STORE__',
+          '__PREFETCHED_STATE__', '__APP_STATE__', '__DATA__', '__RENDER_DATA__'];
+        for (const gk of globalKeys) {
+          try {
+            const obj = window[gk];
+            if (!obj || typeof obj !== 'object') continue;
+            const json = JSON.stringify(obj);
+            for (const re of patterns) {
+              const m = json.match(re);
+              if (m && m[1] && m[1].length > 3) {
+                d.resumeNumber = m[1];
+                d._src = 'window.' + gk;
+                break;
+              }
+            }
+          } catch (_) {}
+          if (d.resumeNumber) break;
+        }
+      }
+
+      // --- 收集诊断信息 ---
+      if (!d.resumeNumber) {
+        // 列出 localStorage 中所有含 resume/user 的 key（截断值）
+        d._diag_ls = [];
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && /resume|cv|user|account|token|at|rt/i.test(k)) {
+              d._diag_ls.push(k + '=' + (localStorage.getItem(k) || '').substring(0, 50));
+            }
+          }
+        } catch (_) {}
+        // 列出页面 script 中所有看起来像 ID 的键值对
+        d._diag_scriptKeys = [];
+        for (const s of document.querySelectorAll('script')) {
+          const t = s.textContent || '';
+          if (t.length < 50 || t.length > 50000) continue;
+          const ms = t.match(/(?:resume|Resume|RESUME)\w{0,10}["'\s:=]+([A-Za-z0-9_-]{4,})/g);
+          if (ms) d._diag_scriptKeys.push(...ms.slice(0, 10));
+        }
+        d._diag_url = window.location.href.substring(0, 100);
+      }
+
+      // --- 其他参数 ---
       const um = window.location.pathname.match(/\/jl(\d+)/);
       if (um) d.cityId = um[1];
-      const sm = html.match(/staffId[^0-9]+(\d+)/);
+      const sm = document.documentElement.outerHTML.match(/staffId[^0-9]+(\d+)/);
       if (sm) d.staffId = parseInt(sm[1]);
+
       return d;
     },
   });
   const pd = (pageData && pageData[0]?.result) || {};
-  const resumeNumber = pd.resumeNumber || '';
+  let resumeNumber = pd.resumeNumber || '';
   const cityIds = [pd.cityId || '538'];
-  const staffId = pd.staffId || 0;
-  if (!resumeNumber) { err('未找到简历编号'); return; }
+  let staffId = pd.staffId || 0;
+
+  // --- 页面提取失败 → API 兜底 ---
+  if (!resumeNumber) {
+    info('页面未找到简历编号，尝试 API 获取...');
+    const tokenQS = 'at=' + encodeURIComponent(at) + '&rt=' + encodeURIComponent(rt) + '&_v=' + Date.now();
+
+    // 尝试方式1: 调用 preparation API（已知可用），从响应中提取简历信息
+    try {
+      // 从第一个 job 的 URL 提取 jobNumber 用于 preparation 请求
+      const firstJobId = jobs[0]?.jobId || (jobs[0]?.url || '').match(/jobdetail\/([a-zA-Z0-9]+)/)?.[1] || '';
+      const apiRes = await chrome.scripting.executeScript({
+        target: { tabId: zlTab.id }, world: 'MAIN',
+        func: async (params) => {
+          try {
+            const { qs, at, rt } = params;
+            const r = await fetch('https://fe-api.zhaopin.com/c/pc/alan/jobs/application/preparation?' + qs, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                at, rt, jobCount: 1, rootOrgId: '', staffId: 0,
+                isShowAttachmentSelect: true, actionId: '',
+              }),
+            });
+            const j = await r.json();
+            const data = j.data || {};
+
+            // 尝试从多个可能位置提取 resumeNumber
+            // 优先级：resumes数组 > defaultResume > 顶层字段 > 深度搜索
+            const arr = data.resumes || data.resumeList || [];
+            let rn = (arr[0]?.number || arr[0]?.resumeNumber || arr[0]?.resumeId || '');
+            if (!rn) rn = data.defaultResume?.number || data.defaultResume?.resumeNumber || data.defaultResume?.resumeId || '';
+            if (!rn) rn = data.resumeNumber || data.resumeId || data.resumeCode || data.defaultResumeNumber || data.number || '';
+            if (rn) return { resumeNumber: String(rn), src: 'api:preparation' };
+
+            // 深度搜索（兜底）
+            const json = JSON.stringify(data);
+            const m = json.match(/"number"\s*:\s*"([A-Za-z0-9_-]{20,})"/)
+              || json.match(/"resumeNumber"\s*:\s*"([^"]{4,})"/)
+              || json.match(/"resumeId"\s*:\s*"([^"]{4,})"/);
+            if (m) return { resumeNumber: m[1], src: 'api:preparation(deep)' };
+            return { _resBody: json.substring(0, 500) };
+          } catch (e) { return { _err: e.message }; }
+        },
+        args: [{ qs: tokenQS, at, rt }],
+      });
+      const ar = (apiRes && apiRes[0]?.result) || {};
+      if (ar.resumeNumber) { resumeNumber = ar.resumeNumber; info('简历编号来源: ' + ar.src); }
+      else if (ar._err) info('API错误(preparation): ' + ar._err);
+      else if (ar._resBody) info('API诊断(preparation): ' + ar._resBody);
+    } catch (_) {}
+
+    // 尝试方式2: 调用用户信息 API（尝试多个端点）
+    if (!resumeNumber) {
+      const userApis = [
+        'https://fe-api.zhaopin.com/c/pc/alan/user/info',
+        'https://fe-api.zhaopin.com/c/pc/alan/user/profile',
+        'https://fe-api.zhaopin.com/c/pc/alan/resume/myResume',
+        'https://fe-api.zhaopin.com/c/pc/alan/resume/baseInfo',
+        'https://fe-api.zhaopin.com/c/pc/alan/account/userinfo',
+      ];
+      for (const apiUrl of userApis) {
+        try {
+          const apiRes2 = await chrome.scripting.executeScript({
+            target: { tabId: zlTab.id }, world: 'MAIN',
+            func: async (params) => {
+              try {
+                const { qs, apiUrl } = params;
+                const r = await fetch(apiUrl + '?' + qs, {
+                  headers: { 'Content-Type': 'application/json' },
+                });
+                const t = await r.text();
+                if (r.status === 404 || t.startsWith('Not Found')) return { _notFound: true, _url: apiUrl };
+                let j;
+                try { j = JSON.parse(t); } catch (_) { return { _err: t.substring(0, 200), _url: apiUrl }; }
+                if (j.code === 200 || j.code === 0 || j.success) {
+                  const data = j.data || j.result || {};
+                  const arr = data.resumes || data.resumeList || [];
+                  let rn = (arr[0]?.number || arr[0]?.resumeNumber || arr[0]?.resumeId || '');
+                  if (!rn) rn = data.defaultResume?.number || data.defaultResume?.resumeNumber || data.defaultResume?.resumeId || '';
+                  if (!rn) rn = data.resumeNumber || data.resumeId || data.defaultResumeNumber || data.resumeCode || data.number || '';
+                  if (rn) return { resumeNumber: String(rn), src: 'api:' + apiUrl.split('/').pop() };
+                  const json = JSON.stringify(data);
+                  const m = json.match(/"number"\s*:\s*"([A-Za-z0-9_-]{20,})"/) || json.match(/"resumeNumber"\s*:\s*"([^"]{4,})"/) || json.match(/"resumeId"\s*:\s*"([^"]{4,})"/);
+                  if (m) return { resumeNumber: m[1], src: 'api:' + apiUrl.split('/').pop() + '(deep)' };
+                }
+                return { _resBody: JSON.stringify(j).substring(0, 300), _url: apiUrl };
+              } catch (e) { return { _err: e.message, _url: apiUrl }; }
+            },
+            args: [{ qs: tokenQS, apiUrl }],
+          });
+          const ar2 = (apiRes2 && apiRes2[0]?.result) || {};
+          if (ar2.resumeNumber) { resumeNumber = ar2.resumeNumber; info('简历编号来源: ' + ar2.src); break; }
+          if (ar2._err) info('API错误(' + (ar2._url||'').split('/').pop() + '): ' + ar2._err);
+          else if (ar2._resBody) info('API诊断(' + (ar2._url||'').split('/').pop() + '): ' + ar2._resBody);
+          // notFound 的不打日志，继续试下一个
+        } catch (_) {}
+      }
+    }
+
+    // 还不行就报错退出
+    if (!resumeNumber) {
+      err('未找到简历编号（页面+API均失败）');
+      if (pd._diag_ls && pd._diag_ls.length) info('诊断-localStorage: ' + pd._diag_ls.join(', '));
+      if (pd._diag_scriptKeys && pd._diag_scriptKeys.length) info('诊断-scriptKeys: ' + pd._diag_scriptKeys.join(', '));
+      if (pd._diag_url) info('诊断-页面URL: ' + pd._diag_url);
+      return;
+    }
+  } else {
+    if (pd._src) info('简历编号来源: ' + pd._src);
+  }
+  if (!staffId && pd.staffId) staffId = pd.staffId;
 
   zIsRunning = true;
   document.getElementById('zStart').disabled = true;

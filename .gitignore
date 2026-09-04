@@ -5,3 +5,5 @@
 resume/
 *.docx
 /dist/
+*.crx
+*.pem

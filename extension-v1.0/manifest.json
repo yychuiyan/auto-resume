@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "招聘平台批量投递 1.0",
+  "name": "简历投递助手",
   "version": "1.0",
   "description": "BOSS / 智联 搜索页抓取后批量投递",
   "permissions": ["storage", "tabs", "scripting", "cookies", "notifications"],

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "招聘平台批量投递",
+  "name": "招聘平台批量投递 1.0",
   "version": "1.0",
-  "description": "BOSS/智联 批量投递",
+  "description": "BOSS / 智联 搜索页抓取后批量投递",
   "permissions": ["storage", "tabs", "scripting", "cookies", "notifications"],
   "background": { "service_worker": "background.js" },
   "host_permissions": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*"],
@@ -24,5 +24,17 @@
       "matches": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*"]
     }
   ],
-  "action": { "default_popup": "popup.html" }
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
 }

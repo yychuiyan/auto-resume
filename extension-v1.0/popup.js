@@ -332,6 +332,8 @@ async function startBatch() {
   const tabs = await chrome.tabs.query({});
   const bossTab = tabs.find(t => t.url?.includes('zhipin.com'));
   if (!bossTab) { setStatus('请打开 BOSS 页面', 'er'); return; }
+  // 主动注入 content.js，避免页面早于扩展加载导致投递静默超时
+  try { await chrome.scripting.executeScript({ target: { tabId: bossTab.id }, files: ['content.js'] }); } catch (_) {}
   const cookies = await chrome.cookies.getAll({ domain: '.zhipin.com' });
   const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
   if (!cookies.find(c => c.name === 'wt2')) { err('未登录 BOSS'); return; }
@@ -724,6 +726,8 @@ async function zStartBatch() {
   const tabs = await chrome.tabs.query({});
   const zlTab = tabs.find(t => t.url?.includes('zhaopin.com'));
   if (!zlTab) { zSetStatus('请打开智联页面', 'er'); return; }
+  // 主动注入 zcontent.js，避免页面早于扩展加载导致投递静默超时
+  try { await chrome.scripting.executeScript({ target: { tabId: zlTab.id }, files: ['zcontent.js'] }); } catch (_) {}
 
   const cookies = await chrome.cookies.getAll({ domain: '.zhaopin.com' });
   const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');

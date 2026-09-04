@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "招聘平台批量投递 2.0",
+  "version": "2.0",
+  "description": "上传简历由 AI 解析匹配后，批量投递 BOSS / 智联 / 前程无忧",
+  "permissions": ["storage", "tabs", "scripting", "cookies", "sidePanel"],
+  "background": { "service_worker": "background.js" },
+  "host_permissions": [
+    "*://*.zhipin.com/*",
+    "*://*.zhaopin.com/*",
+    "*://*.51job.com/*",
+    "https://api.deepseek.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.zhipin.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.zhaopin.com/*"],
+      "js": ["zcontent.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.51job.com/*"],
+      "js": ["wcontent.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js", "zinject.js", "winject.js"],
+      "matches": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*", "*://*.51job.com/*"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "popup.html"
+  }
+}

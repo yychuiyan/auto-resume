@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;min-height:100%}
+body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:10px;font-size:12px}
+.card{background:#16213e;border-radius:8px;padding:10px;margin-bottom:8px}
+.fold-hd{width:100%;display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:0;border:none;background:transparent;color:#888;font-size:11px;cursor:pointer;font-family:inherit;text-align:left}
+.fold-hd .fold-sum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#666;font-weight:400}
+.fold-hd .fold-caret{flex-shrink:0;color:#888}
+#resumeCard.collapsed .fold-hd{margin-bottom:0}
+#resumeCard.collapsed #resumeBody{display:none}
+.btn{width:100%;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;color:#fff;background:linear-gradient(135deg,#0ea5e9,#6366f1)}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.start{background:linear-gradient(135deg,#667eea,#764ba2);margin-top:8px}
+.btn.zp{background:linear-gradient(135deg,#f093fb,#f5576c)}
+.btn.zp.start{background:linear-gradient(135deg,#f093fb,#f5576c)}
+.row{display:flex;gap:6px;align-items:center;margin-top:6px}
+.row input{width:44px;text-align:center;padding:4px;background:#0f0f23;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:11px}
+.row label{color:#888;font-size:11px}
+.prog{display:none;margin-top:6px}
+.bar{height:4px;background:#333;border-radius:3px;margin-top:4px;overflow:hidden}
+.fill{height:100%;border-radius:3px;width:0;transition:width .3s;background:linear-gradient(90deg,#667eea,#764ba2)}
+.panel.zp .fill{background:linear-gradient(90deg,#f093fb,#f5576c)}
+.st{font-size:11px;margin-top:3px}.ok{color:#4ade80}.er{color:#f87171}
+.info{font-size:11px;color:#888;margin-top:4px;min-height:16px}
+.joblist{margin-top:6px;max-height:min(320px,38vh);overflow-y:auto;display:none;font-size:11px;line-height:1.6}
+.toolbar{display:flex;gap:4px;margin-top:4px}
+.toolbar button{flex:1;padding:3px 6px;border:1px solid #333;border-radius:4px;background:transparent;color:#666;font-size:10px;cursor:pointer}
+.toolbar button:hover{color:#aaa;border-color:#555}
+.hint{font-size:10px;color:#666;margin-top:4px;line-height:1.5}
+.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tab{flex:1;padding:7px 0;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;text-align:center;background:#16213e;color:#888}
+.tabcnt{font-size:9px;font-weight:400;opacity:.75;margin-top:1px}
+.day-cnt{font-size:11px;color:#888;margin-bottom:6px}
+.day-cnt b{color:#e0e0e0}
+.tab.boss.active{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
+.tab.zp.active{background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff}
+.tab.w51.active{background:linear-gradient(135deg,#34d399,#059669);color:#fff}
+.panel{display:none}
+.panel.active{display:block}
+.btn.w51{background:linear-gradient(135deg,#34d399,#059669)}
+.btn.w51.start{background:linear-gradient(135deg,#34d399,#059669)}
+.panel.w51 .fill{background:linear-gradient(90deg,#34d399,#059669)}
+.hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.hdr span{font-size:13px;font-weight:600}
+#btnApi{width:auto;padding:4px 8px;border:1px solid #333;border-radius:6px;background:#0f0f23;color:#888;cursor:pointer;font-size:11px}
+#btnApi:hover{color:#fff;border-color:#555}
+.field{margin-top:6px}
+.field label{display:block;color:#888;font-size:10px;margin-bottom:3px}
+.field input,.field textarea,.field select{width:100%;padding:6px 8px;background:#0f0f23;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:12px;font-family:inherit}
+.field input:focus,.field textarea:focus,.field select:focus{outline:none;border-color:#6366f1}
+.field-row{display:flex;gap:8px}
+.field-row .field{flex:1}
+.field textarea{min-height:64px;resize:vertical;line-height:1.5}
+.flash{font-size:11px;margin-top:6px;min-height:16px;line-height:1.4}
+.flash.ok{color:#4ade80}
+.flash.er{color:#f87171}
+#profileEditor{display:none;margin-top:8px;padding-top:8px;border-top:1px solid #222}
+.btn-row{display:flex;gap:6px}
+.btn-row .btn{flex:1}
+.btn.ghost{background:#0f0f23;color:#ccc;border:1px solid #333}
+.file-row{display:none;margin-top:8px;padding:8px 10px;background:#0f0f23;border:1px solid #333;border-radius:6px;align-items:center;gap:8px}
+.file-row.show{display:flex}
+.file-row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0e0e0;font-size:12px}
+.file-row .del{flex-shrink:0;width:auto;padding:3px 8px;border:1px solid #553;border-radius:4px;background:transparent;color:#f87171;cursor:pointer;font-size:11px}
+.file-row .del:hover{border-color:#f87171;color:#fff}
+#apiPanel{display:none}
+#apiPanel.open{display:block}
+.think-box{display:none;margin-top:8px;padding:8px;background:#0f0f23;border:1px solid #333;border-radius:6px;max-height:180px;overflow-y:auto}
+.think-box.show{display:block}
+.think-hd{font-size:10px;color:#888;margin-bottom:4px}
+#thinkText{white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.55;color:#9ca3af;font-family:inherit;min-height:12px}
+</style></head><body>
+<div class="hdr">
+  <span>批量投递</span>
+  <button id="btnApi" type="button">API 设置</button>
+</div>
+<div class="card" id="apiPanel">
+  <div class="ttl">🔑 DeepSeek API</div>
+  <div class="field">
+    <label>API Key</label>
+    <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
+  </div>
+  <div class="field">
+    <label>API 地址</label>
+    <input id="apiBase" type="text" placeholder="https://api.deepseek.com">
+  </div>
+  <div class="field">
+    <label>模型</label>
+    <input id="apiModel" type="text" placeholder="deepseek-v4-flash">
+  </div>
+  <button class="btn ghost" id="btnSaveApi" style="margin-top:8px">保存设置</button>
+  <div class="flash" id="apiSaveMsg"></div>
+  <div class="hint">Key 只存在本机。解析时会把简历正文发给 DeepSeek。</div>
+</div>
+<div class="card" id="resumeCard">
+  <button type="button" class="fold-hd" id="btnToggleResume">
+    <span>📄 简历与匹配规则</span>
+    <span class="fold-sum" id="resumeFoldSum"></span>
+    <span class="fold-caret" id="resumeFoldCaret">收起</span>
+  </button>
+  <div id="resumeBody">
+  <input id="resumeFile" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none">
+  <div class="btn-row">
+    <button class="btn" id="btnUploadResume">上传 Word</button>
+    <button class="btn ghost" id="btnParseResume">解析</button>
+  </div>
+  <div class="file-row" id="resumeFileRow">
+    <span class="name" id="resumeFileName"></span>
+    <button type="button" class="del" id="btnDeleteResume">删除</button>
+  </div>
+  <div class="info" id="resumeInfo">尚未上传。先上传 .docx，再点解析。</div>
+  <div class="flash" id="resumeParseMsg"></div>
+  <div class="think-box" id="thinkBox">
+    <div class="think-hd">思考过程</div>
+    <div id="thinkText"></div>
+  </div>
+  <div class="hint">只支持 .docx。旧版 .doc 请先用 Word 另存为 docx。上传后不会自动解析。</div>
+  <div id="profileEditor">
+    <div class="ttl">✏️ 匹配规则（可微调）</div>
+    <div class="field">
+      <label>期望职位（逗号分隔，用于搜索）</label>
+      <input id="pfTitles" type="text" placeholder="测试工程师, 软件测试工程师">
+    </div>
+    <div class="field">
+      <label>城市</label>
+      <input id="pfCity" type="text" placeholder="上海">
+    </div>
+    <div class="field-row">
+    <div class="field">
+      <label>最低月薪</label>
+      <select id="pfSalary">
+        <option value="0">不限</option>
+        <option value="8">8K+</option>
+        <option value="10">10K+</option>
+        <option value="12">12K+</option>
+        <option value="15">15K+</option>
+        <option value="20">20K+</option>
+        <option value="25">25K+</option>
+        <option value="30">30K+</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>公司规模</label>
+      <select id="pfScale">
+        <option value="0">不限</option>
+        <option value="20">20人+</option>
+        <option value="100">100人+</option>
+        <option value="500">500人+</option>
+        <option value="1000">1000人+</option>
+        <option value="10000">10000人+</option>
+      </select>
+    </div>
+    </div>
+    <div class="field">
+      <label>技能（逗号或换行）</label>
+      <textarea id="pfSkills" rows="4" placeholder="Python, Playwright, 接口测试"></textarea>
+    </div>
+    <div class="field">
+      <label>工作内容关键词（逗号或换行）</label>
+      <textarea id="pfWork" rows="5" placeholder="自动化, 接口, 质量保障"></textarea>
+    </div>
+    <button class="btn ghost" id="btnSaveProfile" style="margin-top:8px">保存匹配规则</button>
+    <div class="flash" id="profileSaveMsg"></div>
+    <div class="hint">保存后三个平台都按这里的内容匹配。未保存的修改不会生效。</div>
+  </div>
+  </div>
+</div>
+<div class="tabs">
+  <button class="tab boss active" id="tabBoss"><div>🔵 BOSS</div><div class="tabcnt">今日 <span id="cntBoss">0</span></div></button>
+  <button class="tab zp" id="tabZhaopin"><div>🔴 智联</div><div class="tabcnt">今日 <span id="cntZp">0</span></div></button>
+  <button class="tab w51" id="tab51"><div>🟢 前程</div><div class="tabcnt">今日 <span id="cntW51">0</span></div></button>
+</div>
+
+<div class="panel active boss" id="panelBoss">
+  <div class="card">
+    <div class="ttl">📄 按简历匹配拉取</div>
+    <div class="day-cnt">今日已投 <b id="dayBoss">0</b></div>
+    <button class="btn" id="btnMatch">📄 读取简历并匹配职位</button>
+    <div class="hint">优先用上方 AI 解析的画像。自动排除派遣/代招、校招、不可选中。粗筛后对前 20 条并发精排。需已登录 BOSS 页面。</div>
+    <div class="info" id="fetchInfo"></div>
+    <div class="prog" id="matchProg" style="display:none;margin-top:6px">
+      <div class="bar"><div class="fill" id="matchFill"></div></div>
+      <span id="matchTxt" style="font-size:10px;color:#888"></span>
+    </div>
+    <div class="joblist" id="jobList"></div>
+  </div>
+  <div class="card" id="cfg" style="display:none">
+    <div class="ttl">⚙️ 批量打招呼</div>
+    <div class="row">
+      <label>数量</label><input id="cnt" type="number" value="5" min="1"><label>个/共 <b id="total">0</b> 个</label>
+    </div>
+    <div class="row">
+      <label>间隔</label><input id="min" type="number" value="3" min="2"><label>~</label><input id="max" type="number" value="5" min="3"><label>秒</label>
+    </div>
+    <button class="btn start" id="btnStart">🚀 开始批量打招呼</button>
+    <div class="prog" id="prog">
+      <div class="bar"><div class="fill" id="pfill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px">
+        <span id="ptxt" style="font-size:10px;color:#888"></span>
+        <span class="st" id="pst"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel zp" id="panelZhaopin">
+  <div class="card">
+    <div class="ttl">📄 按简历匹配拉取</div>
+    <div class="day-cnt">今日已投 <b id="dayZp">0</b></div>
+    <button class="btn zp" id="zBtnMatch">📄 读取简历并匹配职位</button>
+    <div class="hint">自动排除派遣/代招、校招、不可选中。粗筛后对前 20 条并发精排（4 路后台标签读 JD）。需已登录智联页面。</div>
+    <div class="info" id="zFetchInfo"></div>
+    <div class="prog" id="zMatchProg" style="display:none;margin-top:6px">
+      <div class="bar"><div class="fill" id="zMatchFill"></div></div>
+      <span id="zMatchTxt" style="font-size:10px;color:#888"></span>
+    </div>
+    <div class="joblist" id="zJobList"></div>
+  </div>
+  <div class="card" id="zCfg" style="display:none">
+    <div class="ttl">⚙️ 批量投递</div>
+    <div class="row">
+      <label>数量</label><input id="zCnt" type="number" value="5" min="1"><label>个/共 <b id="zTotal">0</b> 个</label>
+    </div>
+    <div class="row">
+      <label>间隔</label><input id="zMin" type="number" value="3" min="2"><label>~</label><input id="zMax" type="number" value="5" min="3"><label>秒</label>
+    </div>
+    <button class="btn zp start" id="zStart">🚀 开始批量投递</button>
+    <div class="prog" id="zProg">
+      <div class="bar"><div class="fill" id="zPfill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px">
+        <span id="zPtxt" style="font-size:10px;color:#888"></span>
+        <span class="st" id="zPst"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel w51" id="panel51">
+  <div class="card">
+    <div class="ttl">📄 按简历匹配拉取</div>
+    <div class="day-cnt">今日已投 <b id="dayW51">0</b></div>
+    <button class="btn w51" id="wBtnMatch">📄 读取简历并匹配职位</button>
+    <div class="hint">自动排除派遣/校招/网申/简历投递。匹配读当前搜索列表；投递在<strong>后台复制的搜索页</strong>点申请，本页不会跳走。刷新搜索页后需重新匹配。</div>
+    <div class="info" id="wFetchInfo"></div>
+    <div class="prog" id="wMatchProg" style="display:none;margin-top:6px">
+      <div class="bar"><div class="fill" id="wMatchFill"></div></div>
+      <span id="wMatchTxt" style="font-size:10px;color:#888"></span>
+    </div>
+    <div class="joblist" id="wJobList"></div>
+  </div>
+  <div class="card" id="wCfg" style="display:none">
+    <div class="ttl">⚙️ 批量投递</div>
+    <div class="row">
+      <label>数量</label><input id="wCnt" type="number" value="5" min="1"><label>个/共 <b id="wTotal">0</b> 个</label>
+    </div>
+    <div class="row">
+      <label>间隔</label><input id="wMin" type="number" value="3" min="2"><label>~</label><input id="wMax" type="number" value="5" min="3"><label>秒</label>
+    </div>
+    <button class="btn w51 start" id="wStart">🚀 开始批量投递</button>
+    <div class="prog" id="wProg">
+      <div class="bar"><div class="fill" id="wPfill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px">
+        <span id="wPtxt" style="font-size:10px;color:#888"></span>
+        <span class="st" id="wPst"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toolbar">
+  <button id="bCancel" style="display:none;color:#f87171;border-color:#f87171">⏹ 取消</button>
+  <button class="clear-log">🗑 清除日志</button>
+</div>
+<div id="log" style="background:#0f0f23;border-radius:8px;padding:8px;margin-top:8px;max-height:min(280px,32vh);overflow-y:auto;font-family:monospace;font-size:10px;line-height:1.6;color:#888"></div>
+<script src="resume-match.js"></script>
+<script src="resume-ai.js"></script>
+<script src="popup.js"></script>
+</body></html>

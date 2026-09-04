@@ -1,3 +1,7 @@
 # 历史文件配置
 .history/
 .claude/
+.DS_Store
+resume/
+*.docx
+/dist/

@@ -122,6 +122,61 @@ function splitProfileList(s) {
   return String(s || '').split(/[,，、\n;；]+/).map(x => x.trim()).filter(Boolean);
 }
 
+function degreeBoxes() {
+  return Array.from(document.querySelectorAll('#pfDegreeList input[data-degree]'));
+}
+
+function getSelectedDegrees() {
+  const opts = (window.ResumeMatch && window.ResumeMatch.DEGREE_OPTS) || ['高中', '中专', '大专', '本科', '硕士', '博士'];
+  const picked = degreeBoxes().filter(el => el.getAttribute('data-degree') !== '__all__' && el.checked)
+    .map(el => el.getAttribute('data-degree'));
+  if (!picked.length || picked.length >= opts.length) return [];
+  return picked;
+}
+
+function setSelectedDegrees(list) {
+  const opts = (window.ResumeMatch && window.ResumeMatch.DEGREE_OPTS) || ['高中', '中专', '大专', '本科', '硕士', '博士'];
+  const want = [].concat(list || []).filter(d => opts.indexOf(d) >= 0);
+  const all = !want.length || want.length >= opts.length;
+  degreeBoxes().forEach((el) => {
+    const v = el.getAttribute('data-degree');
+    el.checked = all || v === '__all__' ? all : want.indexOf(v) >= 0;
+  });
+  const allBox = document.querySelector('#pfDegreeList input[data-degree="__all__"]');
+  if (allBox) allBox.checked = all;
+  const btn = document.getElementById('pfDegreeBtn');
+  if (btn) btn.textContent = all ? '全部' : want.join('、');
+}
+
+function bindDegreePicker() {
+  const wrap = document.getElementById('pfDegree');
+  const btn = document.getElementById('pfDegreeBtn');
+  const list = document.getElementById('pfDegreeList');
+  if (!wrap || !btn || !list || wrap.dataset.bound) return;
+  wrap.dataset.bound = '1';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    wrap.classList.toggle('open');
+  });
+  list.addEventListener('click', (e) => e.stopPropagation());
+  list.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    const v = t.getAttribute('data-degree');
+    if (v === '__all__') {
+      if (t.checked) setSelectedDegrees([]);
+      else {
+        degreeBoxes().forEach((el) => { el.checked = false; });
+        const b = document.getElementById('pfDegreeBtn');
+        if (b) b.textContent = '全部';
+      }
+      return;
+    }
+    setSelectedDegrees(getSelectedDegrees());
+  });
+  document.addEventListener('click', () => wrap.classList.remove('open'));
+}
+
 function fillProfileEditor(p) {
   const box = document.getElementById('profileEditor');
   if (!box) return;
@@ -137,6 +192,7 @@ function fillProfileEditor(p) {
   if (sal) sal.value = String(p.salaryMin > 0 ? p.salaryMin : 0);
   const sc = document.getElementById('pfScale');
   if (sc) sc.value = String(p.scaleMin > 0 ? p.scaleMin : 0);
+  setSelectedDegrees(p.degrees || []);
   box.style.display = 'block';
 }
 
@@ -343,6 +399,7 @@ async function saveProfileEdits() {
       workKeywords: splitProfileList(document.getElementById('pfWork').value),
       salaryMin: parseInt(document.getElementById('pfSalary').value, 10) || 0,
       scaleMin: parseInt(document.getElementById('pfScale').value, 10) || 0,
+      degrees: getSelectedDegrees(),
     };
     if (!raw.titles.length) throw new Error('期望职位不能为空');
     const profile = window.ResumeMatch.extractProfile(JSON.stringify(raw));
@@ -856,6 +913,7 @@ async function startW51Batch() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  bindDegreePicker();
   const savedLogs = await chrome.storage.local.get('ui_logs');
   if (Array.isArray(savedLogs.ui_logs) && savedLogs.ui_logs.length) {
     sessionLogs = savedLogs.ui_logs.slice(-LOG_LIMIT);

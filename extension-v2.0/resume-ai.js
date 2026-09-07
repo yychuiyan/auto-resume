@@ -345,6 +345,9 @@ window.ResumeAI = (() => {
       workKeywords: profile.workKeywords || [],
       salaryMin: profile.salaryMin != null ? Number(profile.salaryMin) || 0 : (prev.salaryMin || 0),
       scaleMin: profile.scaleMin != null ? Number(profile.scaleMin) || 0 : (prev.scaleMin || 0),
+      degrees: profile.degrees !== undefined
+        ? (Array.isArray(profile.degrees) ? profile.degrees : [])
+        : (prev.degrees || []),
       fileName: (extra && extra.fileName) || prev.fileName || '',
       parsedAt: Date.now(),
     };

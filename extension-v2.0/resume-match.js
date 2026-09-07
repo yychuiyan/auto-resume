@@ -24,7 +24,7 @@ window.ResumeMatch = (() => {
     '微服务', '分布式', '高并发', '支付', '结算', '对账', '风控', '推荐', '广告',
   ];
   const VETO = /销售|客服|主播|带货|外卖|骑手|司机|美容|美发|淘宝客服|电销|保险经纪/;
-  const DISPATCH = /派遣|代招|代聘|劳务派遣|岗位外包|人力外包|招聘外包|外包招聘|驻场外包|劳务外包/;
+  const DISPATCH = /派遣|代招|代聘|外包|外派|劳务派遣|岗位外包|人力外包|招聘外包|外包招聘|驻场外包|劳务外包/;
   const TECH = /开发|工程师|后端|前端|客户端|算法|Java|Python|Go|程序|软件|研发/;
   const ZHAOPIN_CITY = {
     '北京': '530', '上海': '538', '广州': '763', '深圳': '765',
@@ -60,6 +60,7 @@ window.ResumeMatch = (() => {
             workKeywords: p.workKeywords || [],
             salaryMin: p.salaryMin || 0,
             scaleMin: p.scaleMin || 0,
+            degrees: p.degrees || [],
           }),
         };
       }
@@ -95,6 +96,7 @@ window.ResumeMatch = (() => {
           workKeywords: j.workKeywords || j.work || [],
           salaryMin: j.salaryMin,
           scaleMin: j.scaleMin,
+          degrees: j.degrees,
         });
       } catch (_) {}
     }
@@ -143,7 +145,54 @@ window.ResumeMatch = (() => {
     const workKeywords = uniq([].concat(p.workKeywords || [])).slice(0, 40);
     const city = String(p.city || '').replace(/市$/, '').trim();
     if (!titles.length) throw new Error('未能从简历抽出期望职位，请重新上传 Word 并用 AI 解析');
-    return { titles, city, cityCode: CITY_CODE[city] || '', skills, workKeywords, salaryMin: salaryMinK(p.salaryMin), scaleMin: salaryMinK(p.scaleMin) };
+    return {
+      titles, city, cityCode: CITY_CODE[city] || '', skills, workKeywords,
+      salaryMin: salaryMinK(p.salaryMin), scaleMin: salaryMinK(p.scaleMin),
+      degrees: p.degrees === undefined ? undefined : normalizeDegrees(p.degrees),
+    };
+  }
+
+  const DEGREE_OPTS = ['高中', '中专', '大专', '本科', '硕士', '博士'];
+
+  function normalizeDegrees(list) {
+    const want = uniq([].concat(list || []).filter(d => DEGREE_OPTS.indexOf(String(d)) >= 0));
+    if (!want.length || want.length >= DEGREE_OPTS.length) return [];
+    return want;
+  }
+
+  function normalizeDegreeOne(raw) {
+    const s = String(raw || '');
+    if (!s || /不限|不拘|无要求|学历不限/.test(s)) return '';
+    if (/博士/.test(s)) return '博士';
+    if (/硕士|研究生/.test(s)) return '硕士';
+    if (/本科|学士/.test(s)) return '本科';
+    if (/大专|专科|高职/.test(s)) return '大专';
+    if (/中专|中技/.test(s)) return '中专';
+    if (/高中|中学|中职/.test(s)) return '高中';
+    return '';
+  }
+
+  function jobDegreeTags(raw) {
+    const s = String(raw || '');
+    const one = normalizeDegreeOne(s);
+    if (!one) return [];
+    if (/及以上|以上/.test(s)) {
+      const i = DEGREE_OPTS.indexOf(one);
+      return i >= 0 ? DEGREE_OPTS.slice(i) : [one];
+    }
+    return [one];
+  }
+
+  function jobDegreeText(job) {
+    return String(job.degree || '');
+  }
+
+  function degreeMismatch(job, profile) {
+    const want = normalizeDegrees(profile && profile.degrees);
+    if (!want.length) return false;
+    const tags = jobDegreeTags(jobDegreeText(job));
+    if (!tags.length) return false;
+    return !tags.some(t => want.indexOf(t) >= 0);
   }
 
   function salaryMinK(v) {
@@ -259,8 +308,8 @@ window.ResumeMatch = (() => {
 
   function whyLabel(why) {
     return ({
-      dispatch: '派遣/代招', campus: '校招', unselect: '不可选中',
-      hunter: '猎头', applied: '已投/已沟通', resumeFlow: '简历投递', salary: '薪资过低', scale: '规模过小',
+      dispatch: '派遣/外包/外派', campus: '校招', unselect: '不可选中',
+      hunter: '猎头', applied: '已投/已沟通', resumeFlow: '简历投递', salary: '薪资过低', scale: '规模过小', degree: '学历不符',
     })[why] || why;
   }
 
@@ -278,7 +327,8 @@ window.ResumeMatch = (() => {
     const hasJd = !!(job.jdText && job.jdText.length >= 40);
     const block = extraWhy(job) || (isDispatch(job) ? 'dispatch' : '')
       || (salaryTooLow(job, profile) ? 'salary' : '')
-      || (scaleTooSmall(job, profile) ? 'scale' : '');
+      || (scaleTooSmall(job, profile) ? 'scale' : '')
+      || (degreeMismatch(job, profile) ? 'degree' : '');
     if (block) {
       log('精排淘汰(' + whyLabel(block) + ') ' + job.name + (job.company ? ' | ' + job.company : ''));
       return false;
@@ -302,7 +352,7 @@ window.ResumeMatch = (() => {
 
   function logExcludes(log, counts) {
     const parts = [];
-    for (const k of ['dispatch', 'campus', 'unselect', 'hunter', 'applied', 'salary', 'scale']) {
+    for (const k of ['dispatch', 'campus', 'unselect', 'hunter', 'applied', 'salary', 'scale', 'degree']) {
       if (counts[k]) parts.push(whyLabel(k) + ' ' + counts[k]);
     }
     if (parts.length) log('已排除 ' + parts.join('、') + ' 条');
@@ -364,7 +414,8 @@ window.ResumeMatch = (() => {
   function scoreList(job, profile) {
     const extra = extraWhy(job) || (isDispatch(job) ? 'dispatch' : '')
       || (salaryTooLow(job, profile) ? 'salary' : '')
-      || (scaleTooSmall(job, profile) ? 'scale' : '');
+      || (scaleTooSmall(job, profile) ? 'scale' : '')
+      || (degreeMismatch(job, profile) ? 'degree' : '');
     if (extra) return { score: 0, veto: true, title: 0, skill: 0, work: 0, why: extra };
     if (isVeto(profile, job.name)) return { score: 0, veto: true, title: 0, skill: 0, work: 0 };
     if (cityMismatch(profile, job)) return { score: 0, veto: true, title: 0, skill: 0, work: 0 };
@@ -407,6 +458,7 @@ window.ResumeMatch = (() => {
       company: j.brandName || j.brand || '',
       salary: j.salaryDesc || '',
       scale: String(j.brandScaleName || j.scaleName || j.brandScale || j.companySize || '').trim(),
+      degree: String(j.jobDegree || j.degreeName || j.degree || j.eduLevel || '').trim(),
       jdText: '',
       tags: [].concat(j.jobLabels || j.labels || []).map(x => typeof x === 'string' ? x : (x && x.name) || '').filter(Boolean),
       goldHunter: !!j.goldHunter,
@@ -641,6 +693,11 @@ window.ResumeMatch = (() => {
       cityName: String(Array.isArray(cityName) ? cityName.join(' ') : cityName || '').trim(),
       salary: String(salary || '').trim(),
       scale: String(scale || '').trim(),
+      degree: String(inner.eduLevel
+        || (typeof inner.education === 'string' ? inner.education : (inner.education && (inner.education.name || inner.education.label)))
+        || inner.degree || inner.minEducation
+        || custom.eduLevel || custom.education || j.eduLevel || j.education || j.degree
+        || '').trim(),
       skills: Array.isArray(skills) ? skills.map(s => typeof s === 'string' ? s : (s.name || s.skillName || '')).filter(Boolean) : [],
       tags: Array.isArray(inner.jobType) ? [].concat(inner.jobType) : [],
       jdText,
@@ -1038,6 +1095,7 @@ window.ResumeMatch = (() => {
       info: String(j.provideSalaryString || j.providesalaryString || j.jobAreaString || '').trim().substring(0, 40),
       salary: String(j.provideSalaryString || j.providesalaryString || '').trim(),
       scale: String(j.companySizeString || j.companySize || '').trim(),
+      degree: String(j.degreeString || j.degreeName || j.degree || j.eduLevel || '').trim(),
       cityName: String(j.jobAreaString || '').trim(),
       skills: tags,
       tags,
@@ -1429,5 +1487,5 @@ window.ResumeMatch = (() => {
     };
   }
 
-  return { loadResume, extractProfile, run, runZhaopin, run51job, LIST_THRESHOLD, REFINE_MAX };
+  return { loadResume, extractProfile, run, runZhaopin, run51job, LIST_THRESHOLD, REFINE_MAX, DEGREE_OPTS };
 })();

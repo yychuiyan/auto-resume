@@ -11,12 +11,18 @@ function dayCountKey(platform) {
 }
 
 async function refreshDayCounts() {
-  const keys = [dayCountKey('boss'), dayCountKey('zp'), dayCountKey('w51')];
+  const keys = [dayCountKey('boss'), dayCountKey('zp'), dayCountKey('w51'),
+    'applied_ids_boss', 'applied_ids_zp', 'applied_ids_w51'];
   const s = await chrome.storage.local.get(keys);
   const nums = {
     boss: s[keys[0]] || 0,
     zp: s[keys[1]] || 0,
     w51: s[keys[2]] || 0,
+  };
+  const applied = {
+    boss: Array.isArray(s.applied_ids_boss) ? s.applied_ids_boss.length : 0,
+    zp: Array.isArray(s.applied_ids_zp) ? s.applied_ids_zp.length : 0,
+    w51: Array.isArray(s.applied_ids_w51) ? s.applied_ids_w51.length : 0,
   };
   const set = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
   set('cntBoss', nums.boss);
@@ -25,6 +31,17 @@ async function refreshDayCounts() {
   set('dayBoss', nums.boss);
   set('dayZp', nums.zp);
   set('dayW51', nums.w51);
+  set('appliedBoss', applied.boss);
+  set('appliedZp', applied.zp);
+  set('appliedW51', applied.w51);
+}
+
+async function clearAppliedIds(platform) {
+  const key = 'applied_ids_' + platform;
+  await chrome.storage.local.remove(key);
+  await refreshDayCounts();
+  const label = ({ boss: 'BOSS', zp: '智联', w51: '前程' })[platform] || platform;
+  info(label + ' 本机已投名单已清空');
 }
 
 function escHtml(s) {
@@ -177,6 +194,61 @@ function bindDegreePicker() {
   document.addEventListener('click', () => wrap.classList.remove('open'));
 }
 
+function directionBoxes() {
+  return Array.from(document.querySelectorAll('#pfDirectionList input[data-direction]'));
+}
+
+function getSelectedDirections() {
+  const opts = (window.ResumeMatch && window.ResumeMatch.DIRECTION_OPTS) || ['软件', '硬件', 'AI测试'];
+  const picked = directionBoxes().filter(el => el.getAttribute('data-direction') !== '__all__' && el.checked)
+    .map(el => el.getAttribute('data-direction'));
+  if (!picked.length || picked.length >= opts.length) return [];
+  return picked;
+}
+
+function setSelectedDirections(list) {
+  const opts = (window.ResumeMatch && window.ResumeMatch.DIRECTION_OPTS) || ['软件', '硬件', 'AI测试'];
+  const want = [].concat(list || []).filter(d => opts.indexOf(d) >= 0);
+  const all = !want.length || want.length >= opts.length;
+  directionBoxes().forEach((el) => {
+    const v = el.getAttribute('data-direction');
+    el.checked = all || v === '__all__' ? all : want.indexOf(v) >= 0;
+  });
+  const allBox = document.querySelector('#pfDirectionList input[data-direction="__all__"]');
+  if (allBox) allBox.checked = all;
+  const btn = document.getElementById('pfDirectionBtn');
+  if (btn) btn.textContent = all ? '全部' : want.join('、');
+}
+
+function bindDirectionPicker() {
+  const wrap = document.getElementById('pfDirection');
+  const btn = document.getElementById('pfDirectionBtn');
+  const list = document.getElementById('pfDirectionList');
+  if (!wrap || !btn || !list || wrap.dataset.bound) return;
+  wrap.dataset.bound = '1';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    wrap.classList.toggle('open');
+  });
+  list.addEventListener('click', (e) => e.stopPropagation());
+  list.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    const v = t.getAttribute('data-direction');
+    if (v === '__all__') {
+      if (t.checked) setSelectedDirections([]);
+      else {
+        directionBoxes().forEach((el) => { el.checked = false; });
+        const b = document.getElementById('pfDirectionBtn');
+        if (b) b.textContent = '全部';
+      }
+      return;
+    }
+    setSelectedDirections(getSelectedDirections());
+  });
+  document.addEventListener('click', () => wrap.classList.remove('open'));
+}
+
 function fillProfileEditor(p) {
   const box = document.getElementById('profileEditor');
   if (!box) return;
@@ -193,6 +265,7 @@ function fillProfileEditor(p) {
   const sc = document.getElementById('pfScale');
   if (sc) sc.value = String(p.scaleMin > 0 ? p.scaleMin : 0);
   setSelectedDegrees(p.degrees || []);
+  setSelectedDirections(p.directions || []);
   box.style.display = 'block';
 }
 
@@ -224,13 +297,14 @@ function renderResumeFile(fileName) {
   row.classList.add('show');
 }
 
-function renderResumeInfo() {
+async function renderResumeInfo() {
   const el = document.getElementById('resumeInfo');
   if (!el) return;
-  Promise.all([
-    window.ResumeAI.loadProfile(),
-    window.ResumeAI.loadResumeUpload(),
-  ]).then(([p, upload]) => {
+  try {
+    const [p, upload] = await Promise.all([
+      window.ResumeAI.loadProfile(),
+      window.ResumeAI.loadResumeUpload(),
+    ]);
     const fileName = (p && p.fileName) || (upload && upload.fileName) || '';
     renderResumeFile(fileName);
     if (p && (p.titles || []).length) {
@@ -248,10 +322,10 @@ function renderResumeInfo() {
     }
     el.textContent = '尚未上传。先上传 .docx，再点解析。';
     renderResumeFoldSum('');
-  }).catch(() => {
+  } catch (_) {
     renderResumeFile('');
     renderResumeFoldSum('');
-  });
+  }
 }
 
 const NEED_RESUME_MSG = '请先上传 Word 简历并解析后再操作';
@@ -400,6 +474,7 @@ async function saveProfileEdits() {
       salaryMin: parseInt(document.getElementById('pfSalary').value, 10) || 0,
       scaleMin: parseInt(document.getElementById('pfScale').value, 10) || 0,
       degrees: getSelectedDegrees(),
+      directions: getSelectedDirections(),
     };
     if (!raw.titles.length) throw new Error('期望职位不能为空');
     const profile = window.ResumeMatch.extractProfile(JSON.stringify(raw));
@@ -914,13 +989,14 @@ async function startW51Batch() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindDegreePicker();
+  bindDirectionPicker();
   const savedLogs = await chrome.storage.local.get('ui_logs');
   if (Array.isArray(savedLogs.ui_logs) && savedLogs.ui_logs.length) {
     sessionLogs = savedLogs.ui_logs.slice(-LOG_LIMIT);
     renderLogs();
   }
   await loadApiSettings();
-  renderResumeInfo();
+  await renderResumeInfo();
   await refreshDayCounts();
   const foldSaved = await chrome.storage.local.get('ui_resume_open');
   if (foldSaved.ui_resume_open === false) setResumeFold(false);
@@ -971,6 +1047,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('btnSaveApi').addEventListener('click', saveApiSettings);
   document.getElementById('btnSaveProfile').addEventListener('click', saveProfileEdits);
+  document.getElementById('clearAppliedBoss')?.addEventListener('click', () => clearAppliedIds('boss'));
+  document.getElementById('clearAppliedZp')?.addEventListener('click', () => clearAppliedIds('zp'));
   document.getElementById('btnToggleResume').addEventListener('click', () => {
     const card = document.getElementById('resumeCard');
     const open = card && card.classList.contains('collapsed');

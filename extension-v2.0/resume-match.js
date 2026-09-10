@@ -4,7 +4,10 @@ window.ResumeMatch = (() => {
   const REFINE_MAX = 20;
   const REFINE_CONCURRENCY = 4;
   const SEARCH_PAGES = 2;
+  const SEARCH_PAGES_MAX = 5;
+  const SEARCH_FRESH_TARGET = 40;
   const DETAIL_GAP_MS = 1500;
+  const JOB51_SORT_LATEST = '1';
 
   function setMatchProgress(platform, data) {
     try { chrome.storage.local.set({ [platform + '_match_progress']: data }); } catch (_) {}
@@ -61,6 +64,7 @@ window.ResumeMatch = (() => {
             salaryMin: p.salaryMin || 0,
             scaleMin: p.scaleMin || 0,
             degrees: p.degrees || [],
+            directions: p.directions || [],
           }),
         };
       }
@@ -97,6 +101,7 @@ window.ResumeMatch = (() => {
           salaryMin: j.salaryMin,
           scaleMin: j.scaleMin,
           degrees: j.degrees,
+          directions: j.directions,
         });
       } catch (_) {}
     }
@@ -149,10 +154,15 @@ window.ResumeMatch = (() => {
       titles, city, cityCode: CITY_CODE[city] || '', skills, workKeywords,
       salaryMin: salaryMinK(p.salaryMin), scaleMin: salaryMinK(p.scaleMin),
       degrees: p.degrees === undefined ? undefined : normalizeDegrees(p.degrees),
+      directions: p.directions === undefined ? undefined : normalizeDirections(p.directions),
     };
   }
 
   const DEGREE_OPTS = ['高中', '中专', '大专', '本科', '硕士', '博士'];
+  const DIRECTION_OPTS = ['软件', '硬件', 'AI测试'];
+  const HARDWARE_RE = /硬件|单片机|嵌入式|固件|FPGA|PCB|电路|芯片|射频|模拟电路|数字电路|MCU|示波器|焊接|原理图|板级/;
+  const AI_TEST_RE = /大模型|LLM|AIGC|生成式|Prompt|RAG|Agent|多模态|向量库|Embedding|模型评测|幻觉|Token|微调|SFT|对齐|AI\s*测试|智能化测试|AI测试/;
+  const SOFTWARE_RE = /软件|后端|前端|服务端|接口测试|自动化|Python|Java|Web|微服务|数据库|测试开发|质量保障|Playwright|pytest|UI自动化|功能测试/;
 
   function normalizeDegrees(list) {
     const want = uniq([].concat(list || []).filter(d => DEGREE_OPTS.indexOf(String(d)) >= 0));
@@ -193,6 +203,35 @@ window.ResumeMatch = (() => {
     const tags = jobDegreeTags(jobDegreeText(job));
     if (!tags.length) return false;
     return !tags.some(t => want.indexOf(t) >= 0);
+  }
+
+  function normalizeDirections(list) {
+    const want = uniq([].concat(list || []).filter(d => DIRECTION_OPTS.indexOf(String(d)) >= 0));
+    if (!want.length || want.length >= DIRECTION_OPTS.length) return [];
+    return want;
+  }
+
+  function jobDirectionBlob(job) {
+    const skills = Array.isArray(job.skills) ? job.skills.join(' ') : String(job.skills || '');
+    const tags = Array.isArray(job.tags) ? job.tags.join(' ') : String(job.tags || '');
+    return [job.name || '', skills, tags, job.info || '', job.jdText || ''].join(' ');
+  }
+
+  function detectJobDirection(job) {
+    const text = jobDirectionBlob(job);
+    if (!text.trim()) return '';
+    if (HARDWARE_RE.test(text)) return '硬件';
+    if (AI_TEST_RE.test(text)) return 'AI测试';
+    if (SOFTWARE_RE.test(text)) return '软件';
+    return '';
+  }
+
+  function directionMismatch(job, profile) {
+    const want = normalizeDirections(profile && profile.directions);
+    if (!want.length) return false;
+    const got = detectJobDirection(job);
+    if (!got) return false;
+    return want.indexOf(got) < 0;
   }
 
   function salaryMinK(v) {
@@ -277,6 +316,68 @@ window.ResumeMatch = (() => {
     return DISPATCH.test(t);
   }
 
+  let outsourceNames = null;
+  let outsourceLoadPromise = null;
+  let appliedLocal = new Set();
+
+  async function loadAppliedLocal(platform) {
+    const key = 'applied_ids_' + platform;
+    try {
+      const s = await chrome.storage.local.get(key);
+      const arr = Array.isArray(s[key]) ? s[key] : [];
+      appliedLocal = new Set(arr.map(String).filter(Boolean));
+    } catch (_) {
+      appliedLocal = new Set();
+    }
+    return appliedLocal.size;
+  }
+
+  function jobAppliedId(job) {
+    return String(job.encryptId || job.jobId || '').trim();
+  }
+
+  function normalizeCompany(s) {
+    return String(s || '')
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/[（(][^）)]*[）)]/g, '')
+      .replace(/(股份)?有限(责任)?公司|集团|控股|分公司$/g, '')
+      .trim();
+  }
+
+  async function loadOutsourceCompanies() {
+    if (outsourceNames) return outsourceNames;
+    if (outsourceLoadPromise) return outsourceLoadPromise;
+    outsourceLoadPromise = (async () => {
+      try {
+        const url = chrome.runtime.getURL('blocklist/outsource-companies.txt');
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const text = await res.text();
+        outsourceNames = String(text || '').split(/\r?\n/)
+          .map(line => line.replace(/#.*$/, '').trim())
+          .filter(Boolean)
+          .map(normalizeCompany)
+          .filter(n => n.length >= 2);
+      } catch (_) {
+        outsourceNames = [];
+      }
+      return outsourceNames;
+    })();
+    return outsourceLoadPromise;
+  }
+
+  function isBlockedOutsourceCompany(job) {
+    const list = outsourceNames || [];
+    if (!list.length) return false;
+    const company = normalizeCompany(job && job.company);
+    if (!company || company.length < 2) return false;
+    for (const name of list) {
+      if (company.includes(name) || name.includes(company)) return true;
+    }
+    return false;
+  }
+
   function is51ResumeFlow(job) {
     if (job.resumeFlow === true) return true;
     const blob = [
@@ -299,6 +400,8 @@ window.ResumeMatch = (() => {
     if (NAME_EXTRA.test(name)) return 'unselect';
     if (job.goldHunter || /猎头/.test(name) || /猎头/.test(String(job.company || ''))) return 'hunter';
     if (job.applied === true || job.hasApplied === true || job.friend === true) return 'applied';
+    const aid = jobAppliedId(job);
+    if (aid && appliedLocal.has(aid)) return 'applied';
     if (job.canSelect === false || job.disabled === true) return 'unselect';
     if (UNSELECT.test(blob)) return 'unselect';
     if (job.source === '51job' && is51ResumeFlow(job)) return 'resumeFlow';
@@ -308,8 +411,8 @@ window.ResumeMatch = (() => {
 
   function whyLabel(why) {
     return ({
-      dispatch: '派遣/外包/外派', campus: '校招', unselect: '不可选中',
-      hunter: '猎头', applied: '已投/已沟通', resumeFlow: '简历投递', salary: '薪资过低', scale: '规模过小', degree: '学历不符',
+      dispatch: '派遣/外包/外派', outsource: '外包公司', campus: '校招', unselect: '不可选中',
+      hunter: '猎头', applied: '已投/已沟通', resumeFlow: '简历投递', salary: '薪资过低', scale: '规模过小', degree: '学历不符', direction: '方向不符',
     })[why] || why;
   }
 
@@ -326,9 +429,11 @@ window.ResumeMatch = (() => {
     if (r.cityName && !job.cityName) job.cityName = r.cityName;
     const hasJd = !!(job.jdText && job.jdText.length >= 40);
     const block = extraWhy(job) || (isDispatch(job) ? 'dispatch' : '')
+      || (isBlockedOutsourceCompany(job) ? 'outsource' : '')
       || (salaryTooLow(job, profile) ? 'salary' : '')
       || (scaleTooSmall(job, profile) ? 'scale' : '')
-      || (degreeMismatch(job, profile) ? 'degree' : '');
+      || (degreeMismatch(job, profile) ? 'degree' : '')
+      || (directionMismatch(job, profile) ? 'direction' : '');
     if (block) {
       log('精排淘汰(' + whyLabel(block) + ') ' + job.name + (job.company ? ' | ' + job.company : ''));
       return false;
@@ -352,7 +457,7 @@ window.ResumeMatch = (() => {
 
   function logExcludes(log, counts) {
     const parts = [];
-    for (const k of ['dispatch', 'campus', 'unselect', 'hunter', 'applied', 'salary', 'scale', 'degree']) {
+    for (const k of ['dispatch', 'outsource', 'campus', 'unselect', 'hunter', 'applied', 'salary', 'scale', 'degree', 'direction']) {
       if (counts[k]) parts.push(whyLabel(k) + ' ' + counts[k]);
     }
     if (parts.length) log('已排除 ' + parts.join('、') + ' 条');
@@ -413,9 +518,11 @@ window.ResumeMatch = (() => {
 
   function scoreList(job, profile) {
     const extra = extraWhy(job) || (isDispatch(job) ? 'dispatch' : '')
+      || (isBlockedOutsourceCompany(job) ? 'outsource' : '')
       || (salaryTooLow(job, profile) ? 'salary' : '')
       || (scaleTooSmall(job, profile) ? 'scale' : '')
-      || (degreeMismatch(job, profile) ? 'degree' : '');
+      || (degreeMismatch(job, profile) ? 'degree' : '')
+      || (directionMismatch(job, profile) ? 'direction' : '');
     if (extra) return { score: 0, veto: true, title: 0, skill: 0, work: 0, why: extra };
     if (isVeto(profile, job.name)) return { score: 0, veto: true, title: 0, skill: 0, work: 0 };
     if (cityMismatch(profile, job)) return { score: 0, veto: true, title: 0, skill: 0, work: 0 };
@@ -468,53 +575,536 @@ window.ResumeMatch = (() => {
     };
   }
 
-  async function searchJobs(tabId, profile, log) {
-    const queries = profile.titles.slice(0, 3);
-    const res = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      func: async (params) => {
-        const jobs = [];
-        const seen = new Set();
-        const diag = [];
-        for (const query of params.queries) {
-          for (let page = 1; page <= params.pages; page++) {
-            const apiUrl = '/wapi/zpgeek/search/joblist.json?site=1&query=' + encodeURIComponent(query)
-              + '&city=' + encodeURIComponent(params.cityCode || params.city || '')
-              + '&page=' + page + '&pageSize=30&experience=&degree=&industry=&scale=&stage=&position=';
+  const BOSS_FILTER_KEYS = [
+    'experience', 'degree', 'industry', 'scale', 'stage', 'position',
+    'salary', 'jobType', 'partTime', 'payType', 'multiBusinessDistrict', 'multiSubway',
+  ];
+
+  function parseBossPageFilters(url) {
+    let u;
+    try { u = new URL(url || ''); } catch (_) {
+      return { hasFilter: false, active: [], params: {}, query: '', city: '', encryptExpectId: '', path: '' };
+    }
+    const sp = u.searchParams;
+    const params = {};
+    for (const k of ['query', 'city', 'encryptExpectId', 'expectId', 'mixExpectType', 'expectInfo'].concat(BOSS_FILTER_KEYS)) {
+      const v = sp.get(k);
+      if (v != null && String(v).trim() !== '') params[k] = String(v).trim();
+    }
+    const active = BOSS_FILTER_KEYS.filter((k) => {
+      const v = String(params[k] || '').trim();
+      return v && v !== '0';
+    });
+    return {
+      hasFilter: active.length > 0,
+      active,
+      params,
+      query: params.query || '',
+      city: params.city || '',
+      encryptExpectId: params.encryptExpectId || params.expectId || '',
+      path: u.pathname || '',
+    };
+  }
+
+  async function readBossPageContext(tabId) {
+    const empty = {
+      hasFilter: false, active: [], params: {}, query: '', city: '',
+      encryptExpectId: '', expectName: '', onRecommend: false, path: '',
+      hasExpectUi: false, diag: '',
+    };
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      let ctx = parseBossPageFilters(tab.url || '');
+      let expectName = '';
+      let hasExpectUi = false;
+      let diag = '';
+      let onRecommend = /job-recommend|\/geek\/recommend/i.test(ctx.path || tab.url || '');
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: async () => {
+            const takeId = (v) => {
+              const s = String(v || '').trim();
+              if (s && s.length >= 6 && s !== '0' && s !== 'null' && s !== 'undefined') return s;
+              return '';
+            };
+            const takeName = (v) => {
+              let s = String(v || '').replace(/\s+/g, ' ').trim()
+                .replace(/^求职期望[:：\s]*/, '')
+                .replace(/^求职意向[:：\s]*/, '');
+              s = s.split(/[|｜\n]/)[0].trim();
+              if (s.length > 24) s = s.slice(0, 24);
+              if (!s) return '';
+              if (/添加|管理期望|切换|全部职位|推荐职位|筛选|经验要求|学历要求/.test(s)) return '';
+              return s;
+            };
+            const normName = (s) => String(s || '')
+              .replace(/[（(][^）)]*[）)]/g, '')
+              .replace(/[·・.\s\-_/]/g, '')
+              .toLowerCase();
+            const nameScore = (selected, candidate) => {
+              const a = normName(selected);
+              const b = normName(candidate);
+              if (!a || !b) return 0;
+              if (a === b) return 100;
+              if (a.includes(b) || b.includes(a)) return 85;
+              if (a.length >= 4 && b.includes(a.slice(0, 4))) return 70;
+              if (b.length >= 4 && a.includes(b.slice(0, 4))) return 70;
+              return 0;
+            };
+            const titleOf = (x) => takeName(
+              x && (x.positionName || x.expectName || x.jobName || x.position || x.name || x.positionNameStr),
+            );
+            const idOf = (x) => takeId(
+              x && (x.encryptExpectId || x.encryptId || x.expectId || x.id),
+            );
+
+            const href = location.href || '';
+            const sp = new URLSearchParams(location.search || (location.hash || '').replace(/^#/, '?'));
+            let encryptExpectId = takeId(sp.get('encryptExpectId') || sp.get('expectId') || '');
+            let expectName = '';
+            let city = sp.get('city') || '';
+            let query = sp.get('query') || '';
+            const onRecommend = /job-recommend|\/geek\/recommend/i.test(location.pathname || href);
+            const notes = [];
+            let nameSource = '';
+            let idSource = encryptExpectId ? 'url' : '';
+
+            // A) 当前选中名称：优先 active 项，再取顶部短文案（避免列表第一项）
+            const actives = document.querySelectorAll(
+              '[class*="expect"] .active, [class*="expect"] .selected, [class*="Expect"] .active,'
+              + '[class*="expect"] [aria-selected="true"], .expect-list .active, .expect-item.active,'
+              + 'li.active[class*="expect"], [ka*="expect"].active, [class*="expect-select"] .active',
+            );
+            for (const el of actives) {
+              const nm = takeName(el.getAttribute('title') || el.textContent);
+              if (!nm || !/测试|开发|工程师|产品|设计|运营|算法|前端|后端|QA|质量|Java|经理|专员/.test(nm)) continue;
+              expectName = nm;
+              nameSource = 'domActive';
+              const id = takeId(
+                el.getAttribute('data-id')
+                || el.getAttribute('data-expectid')
+                || el.getAttribute('data-encrypt-id')
+                || el.getAttribute('encryptExpectId'),
+              );
+              if (id) { encryptExpectId = id; idSource = 'domActive'; }
+              break;
+            }
+            if (!expectName) {
+              const cands = [];
+              const nodes = document.querySelectorAll('span, a, div, p, button, label');
+              for (const el of nodes) {
+                if (el.children && el.children.length > 3) continue;
+                const raw = el.getAttribute('title')
+                  || (el.childElementCount === 0 ? el.textContent : '')
+                  || '';
+                const nm = takeName(raw);
+                if (!nm || nm.length < 2 || nm.length > 18) continue;
+                if (!/测试|开发|工程师|产品|设计|运营|算法|前端|后端|QA|质量|Java|经理|专员/.test(nm)) continue;
+                const big = String(el.textContent || '').replace(/\s+/g, ' ');
+                if ((big.match(/测试|开发|工程师|产品/g) || []).length >= 3) continue;
+                const rect = el.getBoundingClientRect();
+                if (!rect || rect.width < 4 || rect.height < 4) continue;
+                if (rect.top < 0 || rect.top > 170) continue;
+                const cls = String(el.className || '') + ' '
+                  + String(el.parentElement && el.parentElement.className || '');
+                const boost = /expect|意向|job-select|select-expect/i.test(cls) ? 40 : 0;
+                // 越靠左上越像当前选中展示
+                cands.push({
+                  nm,
+                  score: boost + (rect.left < 480 ? 20 : 0) + Math.max(0, 120 - rect.top),
+                });
+              }
+              cands.sort((a, b) => b.score - a.score);
+              // 若出现多个不同名字，优先带 expect 类的；不要默默拿「列表第一项」长容器
+              if (cands[0] && cands[0].score >= 40) {
+                expectName = cands[0].nm;
+                nameSource = 'domTop';
+              }
+            }
+
+            const expectRoots = Array.from(document.querySelectorAll(
+              '[class*="expect"], [class*="Expect"], [ka*="expect"], [data-expect], .job-expect, .expect-list',
+            )).slice(0, 50);
+            const hasExpectUi = expectRoots.some((el) => /求职期望|求职意向|期望职位/.test(el.textContent || ''))
+              || /求职期望|求职意向/.test(document.body ? document.body.innerText.slice(0, 2500) : '');
+
+            // B) 期望列表接口 / 页面 JSON（用名称对齐 id，绝不默认第一项）
+            const expectApis = [
+              '/wapi/zpgeek/expect/list.json',
+              '/wapi/zpgeek/expect/list',
+              '/wapi/zpgeek/pc/expect/list.json',
+              '/wapi/zpgeek/home/data/info.json',
+              '/wapi/zprelation/expect/list.json',
+              '/wapi/zpgeek/expect/query/list.json',
+            ];
+            let expectList = [];
+            for (const url of expectApis) {
+              try {
+                const r = await fetch(url, { credentials: 'include' });
+                const j = await r.json();
+                const zp = j.zpData || {};
+                const list = zp.expectList || zp.list || zp.expectQueryList
+                  || zp.expectInfos || zp.expects
+                  || (Array.isArray(zp) ? zp : null);
+                if (Array.isArray(list) && list.length) {
+                  expectList = list;
+                  notes.push('api:' + url.split('/').pop());
+                  break;
+                }
+              } catch (_) {}
+            }
+            if (!expectList.length) {
+              try {
+                const html = (document.documentElement && document.documentElement.innerHTML || '').slice(0, 500000);
+                const re = /"encryptExpectId"\s*:\s*"([^"]+)"([\s\S]{0,240}?)"(?:positionName|expectName|jobName|position)"\s*:\s*"([^"]+)"/g;
+                const re2 = /"(?:positionName|expectName|jobName|position)"\s*:\s*"([^"]+)"([\s\S]{0,240}?)"encryptExpectId"\s*:\s*"([^"]+)"/g;
+                const map = new Map();
+                let m;
+                while ((m = re.exec(html))) map.set(m[1], m[3]);
+                while ((m = re2.exec(html))) map.set(m[3], m[1]);
+                for (const [id, name] of map.entries()) {
+                  expectList.push({ encryptExpectId: id, positionName: name });
+                }
+                if (expectList.length) notes.push('htmlJson:' + expectList.length);
+              } catch (_) {}
+            }
+
+            const pickByName = (list, name) => {
+              if (!name || !list.length) return null;
+              let best = null;
+              let bestScore = 0;
+              for (const x of list) {
+                const sc = nameScore(name, titleOf(x));
+                if (sc > bestScore) { bestScore = sc; best = x; }
+              }
+              return bestScore >= 70 ? best : null;
+            };
+
+            if (expectList.length && expectName) {
+              const hit = pickByName(expectList, expectName);
+              if (hit) {
+                const id = idOf(hit);
+                if (id) { encryptExpectId = id; idSource = 'nameMatch'; }
+                const tn = titleOf(hit);
+                if (tn) { expectName = tn; nameSource = nameSource || 'nameMatch'; }
+                if (!city) city = String(hit.locationName || hit.cityCode || hit.city || hit.location || '');
+              }
+            }
+
+            // C) 最近 joblist/recommend 请求：仅作无名称匹配时的兜底；有名称时优先用「与名称匹配」的列表 id
+            let perfId = '';
+            try {
+              const entries = performance.getEntriesByType('resource') || [];
+              for (let i = entries.length - 1; i >= 0; i--) {
+                const name = entries[i].name || '';
+                if (!/(?:joblist\.json|recommend\/job\/list)/i.test(name)) continue;
+                try {
+                  const u = new URL(name, location.origin);
+                  const id = takeId(u.searchParams.get('encryptExpectId') || u.searchParams.get('expectId'));
+                  if (id) { perfId = id; break; }
+                } catch (_) {}
+              }
+            } catch (_) {}
+
+            // 若已有 nameMatch id，不要被旧 perf 覆盖
+            if (!encryptExpectId && perfId) {
+              encryptExpectId = perfId;
+              idSource = 'perf';
+            } else if (encryptExpectId && perfId && idSource !== 'nameMatch' && idSource !== 'domActive' && !expectName) {
+              // 无可靠名称时用最新 perf
+              encryptExpectId = perfId;
+              idSource = 'perf';
+            }
+
+            // D) 有 id 无名称时，用列表反查名称（避免显示成第一项）
+            if (encryptExpectId && expectList.length) {
+              const hit = expectList.find((x) => idOf(x) === encryptExpectId);
+              if (hit) {
+                const tn = titleOf(hit);
+                if (tn && (!expectName || nameSource === 'domTop' || nameSource === '')) {
+                  // 若 domTop 名字和 id 对不上，以 id 对应名为准？更稳：以 nameMatch 为准。
+                  // 这里仅在还没名字时补名
+                }
+                if (tn && !expectName) {
+                  expectName = tn;
+                  nameSource = 'idLookup';
+                }
+                // 关键：dom 名字与 id 所属期望不一致 → 以名字重新匹配 id
+                if (expectName && tn && nameScore(expectName, tn) < 70) {
+                  const byName = pickByName(expectList, expectName);
+                  if (byName && idOf(byName)) {
+                    encryptExpectId = idOf(byName);
+                    idSource = 'nameOverride';
+                    expectName = titleOf(byName) || expectName;
+                    notes.push('fixIdNameMismatch');
+                  }
+                }
+              }
+            }
+
+            if (nameSource) notes.push('name:' + nameSource);
+            if (idSource) notes.push('id:' + idSource);
+
+            return {
+              href,
+              encryptExpectId: String(encryptExpectId || '').trim(),
+              expectName: String(expectName || '').trim().slice(0, 40),
+              city: String(city || '').trim(),
+              query: String(query || '').trim(),
+              onRecommend,
+              hasExpectUi,
+              expectCount: expectList.length,
+              notes: notes.join(','),
+            };
+          },
+        });
+        const page = (res && res[0] && res[0].result) || {};
+        if (page.href) ctx = parseBossPageFilters(page.href);
+        if (page.encryptExpectId) ctx.encryptExpectId = page.encryptExpectId;
+        if (page.city && !ctx.city) ctx.city = page.city;
+        if (page.query && !ctx.query) ctx.query = page.query;
+        expectName = page.expectName || '';
+        hasExpectUi = !!page.hasExpectUi;
+        onRecommend = !!(page.onRecommend || onRecommend);
+        diag = 'ui=' + (hasExpectUi ? 1 : 0)
+          + ' expectN=' + (page.expectCount || 0)
+          + ' id=' + (page.encryptExpectId ? 'Y' : 'N')
+          + ' name=' + (expectName || '-')
+          + ' path=' + (ctx.path || '-')
+          + (page.notes ? (' via=' + page.notes) : '');
+      } catch (e) {
+        diag = 'readErr:' + (e && e.message || e);
+      }
+      return {
+        ...ctx,
+        encryptExpectId: ctx.encryptExpectId || '',
+        expectName,
+        onRecommend,
+        hasExpectUi,
+        diag,
+      };
+    } catch (_) {
+      return empty;
+    }
+  }
+
+  async function searchJobsByRecommend(tabId, profile, log, opts) {
+    const city = (opts && opts.city) || profile.cityCode || profile.city || '';
+    const encryptExpectId = (opts && opts.encryptExpectId) || '';
+    const filters = (opts && opts.filters) || {};
+    const mapped = [];
+    const seen = new Set();
+    let usedPages = 0;
+    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: async (params) => {
+          const jobs = [];
+          const diag = [];
+          let stop = false;
+          let stopMsg = '';
+          const qs = new URLSearchParams();
+          qs.set('page', String(params.page));
+          qs.set('pageSize', '15');
+          qs.set('city', params.city || '');
+          qs.set('encryptExpectId', params.encryptExpectId || '');
+          qs.set('mixExpectType', params.filters.mixExpectType || '');
+          qs.set('expectInfo', params.filters.expectInfo || '');
+          for (const k of params.filterKeys || []) {
+            const v = params.filters[k];
+            qs.set(k, v != null && String(v) !== '0' ? String(v) : '');
+          }
+          const tryUrls = [
+            '/wapi/zpgeek/pc/recommend/job/list.json?' + qs.toString(),
+            '/wapi/zpgeek/search/joblist.json?site=1&scene=1&query=&'
+              + qs.toString(),
+          ];
+          for (const apiUrl of tryUrls) {
+            try {
+              const apiRes = await fetch(apiUrl, { credentials: 'include' });
+              const json = await apiRes.json();
+              const jl = (json.zpData && (json.zpData.jobList || json.zpData.list)) || [];
+              const tag = apiUrl.includes('recommend') ? 'recommend' : 'joblist';
+              diag.push(tag + ' p' + params.page + ' code=' + json.code + ' n=' + jl.length);
+              if (json.code !== 0) {
+                const msg = JSON.stringify(json).slice(0, 200);
+                if (/请稍候|captcha|hasCaptcha|验证码|极验/i.test(msg)) {
+                  stop = true;
+                  stopMsg = msg;
+                  break;
+                }
+                continue;
+              }
+              for (const j of jl) jobs.push(j);
+              if (jl.length) break;
+            } catch (e) {
+              diag.push('err=' + e.message);
+            }
+          }
+          return { jobs, diag, stop, stopMsg };
+        },
+        args: [{
+          page,
+          city,
+          encryptExpectId,
+          filters,
+          filterKeys: BOSS_FILTER_KEYS,
+        }],
+      });
+      const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
+      if (raw.diag && raw.diag.length) log('期望推荐: ' + raw.diag.join(' | '));
+      if (raw.stop) throw new Error('搜索触发风控，已停止。' + (raw.stopMsg || ''));
+      let added = 0;
+      for (const j of raw.jobs || []) {
+        const job = mapApiJob(j);
+        if (!job.encryptId || seen.has(job.encryptId)) continue;
+        seen.add(job.encryptId);
+        mapped.push(job);
+        added++;
+      }
+      usedPages = page;
+      const fresh = mapped.filter((j) => !appliedLocal.has(String(j.encryptId || ''))).length;
+      if (page >= SEARCH_PAGES && fresh >= SEARCH_FRESH_TARGET) break;
+      if (!added && page >= SEARCH_PAGES) break;
+    }
+    log('BOSS 搜索共 ' + mapped.length + ' 条（求职期望，' + usedPages + ' 页，目标未投≥' + SEARCH_FRESH_TARGET + '）');
+    return mapped;
+  }
+
+  async function readBossPageFilters(tabId) {
+    return readBossPageContext(tabId);
+  }
+
+  async function searchJobsByApi(tabId, profile, log, opts) {
+    const queries = (opts && opts.queries && opts.queries.length)
+      ? opts.queries
+      : profile.titles.slice(0, 3);
+    const city = (opts && opts.city) || profile.cityCode || profile.city || '';
+    const filters = (opts && opts.filters) || {};
+    const mapped = [];
+    const seen = new Set();
+    let usedPages = 0;
+    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: async (params) => {
+          const jobs = [];
+          const diag = [];
+          let stop = false;
+          let stopMsg = '';
+          const filterKeys = params.filterKeys || [];
+          for (const query of params.queries) {
+            const qs = new URLSearchParams();
+            qs.set('site', '1');
+            qs.set('query', query || '');
+            qs.set('city', params.city || '');
+            qs.set('page', String(params.page));
+            qs.set('pageSize', '30');
+            for (const k of filterKeys) {
+              qs.set(k, params.filters[k] != null ? String(params.filters[k]) : '');
+            }
+            // 无筛选时与旧逻辑一致，显式带空筛选字段
+            if (!params.usePageFilters) {
+              for (const k of ['experience', 'degree', 'industry', 'scale', 'stage', 'position']) {
+                if (!qs.has(k)) qs.set(k, '');
+              }
+            }
+            const apiUrl = '/wapi/zpgeek/search/joblist.json?' + qs.toString();
             try {
               const apiRes = await fetch(apiUrl);
               const json = await apiRes.json();
               const jl = (json.zpData && (json.zpData.jobList || json.zpData.list)) || [];
-              diag.push(query + ' p' + page + ' code=' + json.code + ' n=' + jl.length);
+              diag.push(query + ' p' + params.page + ' code=' + json.code + ' n=' + jl.length);
               if (json.code !== 0) {
                 const msg = JSON.stringify(json).slice(0, 200);
                 if (/请稍候|captcha|hasCaptcha|验证码|极验/i.test(msg)) {
-                  return { jobs, diag, stop: true, stopMsg: msg };
+                  stop = true;
+                  stopMsg = msg;
+                  break;
                 }
               }
               for (const j of jl) jobs.push(j);
             } catch (e) {
-              diag.push(query + ' p' + page + ' err=' + e.message);
+              diag.push(query + ' p' + params.page + ' err=' + e.message);
             }
           }
-        }
-        return { jobs, diag, stop: false };
-      },
-      args: [{ queries, city: profile.city, cityCode: profile.cityCode, pages: SEARCH_PAGES }],
-    });
-    const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
-    if (raw.diag && raw.diag.length) log('搜索: ' + raw.diag.join(' | '));
-    if (raw.stop) throw new Error('搜索触发风控，已停止。' + (raw.stopMsg || ''));
-    const mapped = [];
-    const seen = new Set();
-    for (const j of raw.jobs || []) {
-      const job = mapApiJob(j);
-      if (!job.encryptId || seen.has(job.encryptId)) continue;
-      seen.add(job.encryptId);
-      mapped.push(job);
+          return { jobs, diag, stop, stopMsg };
+        },
+        args: [{
+          queries,
+          city,
+          page,
+          filters,
+          filterKeys: BOSS_FILTER_KEYS,
+          usePageFilters: !!(opts && opts.usePageFilters),
+        }],
+      });
+      const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
+      if (raw.diag && raw.diag.length) log('搜索: ' + raw.diag.join(' | '));
+      if (raw.stop) throw new Error('搜索触发风控，已停止。' + (raw.stopMsg || ''));
+      let added = 0;
+      for (const j of raw.jobs || []) {
+        const job = mapApiJob(j);
+        if (!job.encryptId || seen.has(job.encryptId)) continue;
+        seen.add(job.encryptId);
+        mapped.push(job);
+        added++;
+      }
+      usedPages = page;
+      const fresh = mapped.filter((j) => !appliedLocal.has(String(j.encryptId || ''))).length;
+      if (page >= SEARCH_PAGES && fresh >= SEARCH_FRESH_TARGET) break;
+      if (!added && page >= SEARCH_PAGES) break;
     }
+    const mode = (opts && opts.usePageFilters) ? '页面筛选' : '画像接口';
+    log('BOSS 搜索共 ' + mapped.length + ' 条（' + mode + '，' + usedPages + ' 页，目标未投≥' + SEARCH_FRESH_TARGET + '）');
     return mapped;
+  }
+
+  async function searchJobs(tabId, profile, log) {
+    const pageCtx = await readBossPageContext(tabId);
+    if (pageCtx.diag) log('页面期望诊断: ' + pageCtx.diag);
+    // 有期望 id / 推荐页 / 页面上已展示求职期望选中项 → 走期望推荐
+    const useExpect = !!(pageCtx.encryptExpectId || pageCtx.onRecommend
+      || (pageCtx.hasExpectUi && pageCtx.expectName));
+    if (useExpect) {
+      const name = pageCtx.expectName || pageCtx.encryptExpectId || '当前期望';
+      log('按求职期望拉列表: ' + name
+        + (pageCtx.encryptExpectId ? (' id=' + pageCtx.encryptExpectId.slice(0, 12) + '…') : '（默认期望）'));
+      if (pageCtx.hasFilter) {
+        log('同时沿用页面筛选: ' + pageCtx.active.map((k) => k + '=' + (pageCtx.params[k] || '')).join(', '));
+      }
+      return searchJobsByRecommend(tabId, profile, log, {
+        encryptExpectId: pageCtx.encryptExpectId || '',
+        city: pageCtx.city || profile.cityCode || profile.city || '',
+        filters: pageCtx.params,
+      });
+    }
+    if (pageCtx.hasFilter) {
+      const label = pageCtx.active.map((k) => k + '=' + (pageCtx.params[k] || '')).join(', ');
+      log('检测到页面筛选，按筛选条件拉列表: ' + label);
+      const queries = pageCtx.query
+        ? [pageCtx.query]
+        : profile.titles.slice(0, 3);
+      if (pageCtx.query) log('沿用页面关键词: ' + pageCtx.query);
+      else log('页面无关键词，改用画像职位: ' + queries.join('/'));
+      return searchJobsByApi(tabId, profile, log, {
+        queries,
+        city: pageCtx.city || profile.cityCode || profile.city || '',
+        filters: pageCtx.params,
+        usePageFilters: true,
+      });
+    }
+    log('未识别到求职期望/筛选，按画像职位走接口搜索');
+    return searchJobsByApi(tabId, profile, log, {
+      queries: profile.titles.slice(0, 3),
+      city: profile.cityCode || profile.city || '',
+      filters: {},
+      usePageFilters: false,
+    });
   }
 
   async function refineJobs(tabId, jobs, profile, log) {
@@ -591,11 +1181,15 @@ window.ResumeMatch = (() => {
   }
 
   async function run({ tabId, log }) {
+    await loadOutsourceCompanies();
+    const appliedN = await loadAppliedLocal('boss');
     const loaded = await loadResume();
     log('简历文件: ' + loaded.file);
     const profile = extractProfile(loaded.text);
     log('画像 职位=' + profile.titles.join('/') + ' 城市=' + (profile.city || '未识别')
       + ' 技能=' + profile.skills.slice(0, 8).join(',') + ' 工作词=' + profile.workKeywords.slice(0, 8).join(','));
+    if ((outsourceNames || []).length) log('外包公司黑名单 ' + outsourceNames.length + ' 家');
+    if (appliedN) log('本地已投去重 ' + appliedN + ' 条');
 
     const listed = await searchJobs(tabId, profile, log);
     log('搜索到 ' + listed.length + ' 条，开始列表粗筛');
@@ -733,114 +1327,145 @@ window.ResumeMatch = (() => {
     }
   }
 
-  async function searchZhaopinJobs(tabId, profile, log) {
-    const queries = profile.titles.slice(0, 4);
-    const cityId = ZHAOPIN_CITY[profile.city] || '';
-    const res = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      func: async (params) => {
-        const jobs = [];
-        const diag = [];
-        const cookieVal = (name) => {
-          const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-          return m ? decodeURIComponent(m[1]) : '';
-        };
-        const extractList = (json) => {
-          const d = json && json.data;
-          if (!d) return json.list || json.results || [];
-          return d.list || d.results || d.jobList || d.positions || [];
-        };
-        const postSearch = async (query, page) => {
-          const body = {
-            S_SOU_FULL_INDEX: query,
-            pageIndex: page,
-            pageSize: 30,
-            eventScenario: 'pcSearchedSou',
-          };
-          if (params.cityId) body.S_SOU_WORK_CITY = String(params.cityId);
-          const at = cookieVal('at');
-          const rt = cookieVal('rt');
-          if (at) body.at = at;
-          if (rt) body.rt = rt;
-          const apiRes = await fetch('https://fe-api.zhaopin.com/c/i/search/positions', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          const t = await apiRes.text();
-          if (!t || t.trim().charAt(0) === '<') return { html: true, status: apiRes.status, n: 0, list: [] };
-          const json = JSON.parse(t);
-          const list = extractList(json);
-          const data = json.data || {};
-          return {
-            html: false,
-            status: apiRes.status,
-            code: json.code || json.status || json.apiCode,
-            n: list.length,
-            list,
-            verify: data.isVerification,
-          };
-        };
-        const scrapeDom = () => {
+  async function scrapeZhaopinCurrentList(tabId, log) {
+    try {
+      const pageRes = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: () => {
           const out = [];
-          const seen = new Set();
-          const push = (id, name, company, href) => {
-            if (!id || seen.has(id)) return;
-            seen.add(id);
-            out.push({ number: id, jobName: name, companyName: company, positionURL: href });
+          const seenDom = new Set();
+          const add = (id, name, company, href) => {
+            if (!id || seenDom.has(id)) return;
+            seenDom.add(id);
+            out.push({
+              number: id,
+              jobName: (name || '').trim(),
+              companyName: (company || '').trim(),
+              positionURL: href,
+            });
           };
-          for (const card of document.querySelectorAll('.joblist-box__item, [class*="joblist"] [class*="item"]')) {
-            const link = card.querySelector('a[href*="jobdetail"], a[href*="/job/"]');
-            if (!link) continue;
-            const href = link.href || '';
-            const id = (href.match(/jobdetail\/([a-zA-Z0-9]+)/i) || href.match(/\/jobs?\/([a-zA-Z0-9]+)/i) || [])[1] || '';
-            const nameEl = card.querySelector('[class*="job-name"], [class*="jobName"], [class*="title"], h3, .jobname');
+          for (const a of document.querySelectorAll('a[href*="jobdetail"]')) {
+            const href = a.href || '';
+            const id = (href.match(/jobdetail\/([a-zA-Z0-9]+)/i) || [])[1] || '';
+            const card = a.closest('.joblist-box__item, li, article, [class*="job"]') || a;
+            const nameEl = card.querySelector('[class*="job-name"], [class*="jobName"], [class*="title"], h3');
             const coEl = card.querySelector('[class*="company"], [class*="corp"]');
-            push(id, (nameEl && nameEl.textContent) || link.textContent || '', (coEl && coEl.textContent) || '', href);
+            add(id, (nameEl && nameEl.textContent) || a.textContent || '', (coEl && coEl.textContent) || '', href);
           }
-          if (!out.length) {
-            for (const a of document.querySelectorAll('a[href*="jobdetail"]')) {
-              const href = a.href || '';
-              const id = (href.match(/jobdetail\/([a-zA-Z0-9]+)/i) || [])[1] || '';
-              push(id, (a.textContent || '').trim(), '', href);
-            }
-          }
-          return out;
-        };
-        for (const query of params.queries) {
-          for (let page = 1; page <= params.pages; page++) {
+          return {
+            n: out.length,
+            jobs: out,
+            hrefCount: document.querySelectorAll('a[href*="jobdetail"]').length,
+            url: location.href.slice(0, 160),
+          };
+        },
+      });
+      const pageRaw = (pageRes && pageRes[0] && pageRes[0].result) || { n: 0, jobs: [] };
+      if (pageRaw.url) log('意向页: ' + pageRaw.url);
+      return collectMappedZp(pageRaw.jobs);
+    } catch (e) {
+      log('抓取当前智联列表失败: ' + (e.message || e));
+      return [];
+    }
+  }
+
+  async function searchZhaopinByQueries(tabId, profile, log, opts) {
+    const queries = (opts && opts.queries && opts.queries.length)
+      ? opts.queries
+      : profile.titles.slice(0, 4);
+    const cityId = (opts && opts.cityId) || ZHAOPIN_CITY[profile.city] || '';
+    const mode = (opts && opts.mode) || '画像接口';
+    const mappedAll = [];
+    const seen = new Set();
+    let usedPages = 0;
+    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: async (params) => {
+          const jobs = [];
+          const diag = [];
+          const cookieVal = (name) => {
+            const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+            return m ? decodeURIComponent(m[1]) : '';
+          };
+          const extractList = (json) => {
+            const d = json && json.data;
+            if (!d) return json.list || json.results || [];
+            return d.list || d.results || d.jobList || d.positions || [];
+          };
+          const postSearch = async (query, pageNum) => {
+            const body = {
+              S_SOU_FULL_INDEX: query,
+              pageIndex: pageNum,
+              pageSize: 30,
+              eventScenario: 'pcSearchedSou',
+            };
+            if (params.cityId) body.S_SOU_WORK_CITY = String(params.cityId);
+            const at = cookieVal('at');
+            const rt = cookieVal('rt');
+            if (at) body.at = at;
+            if (rt) body.rt = rt;
+            const apiRes = await fetch('https://fe-api.zhaopin.com/c/i/search/positions', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            const t = await apiRes.text();
+            if (!t || t.trim().charAt(0) === '<') return { html: true, status: apiRes.status, n: 0, list: [] };
+            const json = JSON.parse(t);
+            const list = extractList(json);
+            const data = json.data || {};
+            return {
+              html: false,
+              status: apiRes.status,
+              code: json.code || json.status || json.apiCode,
+              n: list.length,
+              list,
+              verify: data.isVerification,
+            };
+          };
+          for (const query of params.queries) {
             try {
-              const r = await postSearch(query, page);
+              const r = await postSearch(query, params.page);
               if (r.html) {
-                diag.push(query + ' p' + page + ' search/positions html');
+                diag.push(query + ' p' + params.page + ' search/positions html');
               } else {
-                diag.push(query + ' p' + page + ' positions code=' + (r.code || '?') + ' n=' + r.n
+                diag.push(query + ' p' + params.page + ' positions code=' + (r.code || '?') + ' n=' + r.n
                   + (r.verify ? ' verify=' + r.verify : ''));
                 for (const j of r.list || []) jobs.push(j);
               }
             } catch (e) {
-              diag.push(query + ' p' + page + ' err=' + e.message);
+              diag.push(query + ' p' + params.page + ' err=' + e.message);
             }
           }
-        }
-        if (!jobs.length) {
-          const dom = scrapeDom();
-          if (dom.length) {
-            diag.push('dom n=' + dom.length);
-            for (const j of dom) jobs.push(j);
-          }
-        }
-        return { jobs, diag };
-      },
-      args: [{ queries, cityId, pages: SEARCH_PAGES }],
-    });
-    const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
-    if (raw.diag && raw.diag.length) log('智联搜索: ' + raw.diag.join(' | '));
-    let mapped = collectMappedZp(raw.jobs);
-    if (mapped.length) return mapped;
+          return { jobs, diag };
+        },
+        args: [{ queries, cityId, page }],
+      });
+      const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
+      if (raw.diag && raw.diag.length) log('智联搜索: ' + raw.diag.join(' | '));
+      const batch = collectMappedZp(raw.jobs);
+      let added = 0;
+      for (const job of batch) {
+        if (!job.jobId || seen.has(job.jobId)) continue;
+        seen.add(job.jobId);
+        mappedAll.push(job);
+        added++;
+      }
+      usedPages = page;
+      const fresh = mappedAll.filter((j) => !appliedLocal.has(String(j.jobId || ''))).length;
+      if (page >= SEARCH_PAGES && fresh >= SEARCH_FRESH_TARGET) break;
+      if (!added && page >= SEARCH_PAGES) break;
+    }
+    if (mappedAll.length) {
+      log('智联搜索共 ' + mappedAll.length + ' 条（' + mode + '，' + usedPages + ' 页，目标未投≥' + SEARCH_FRESH_TARGET + '）');
+      return mappedAll;
+    }
 
+    // 接口空：打开搜索页抓 DOM（仅画像兜底时多关键词；意向模式只开一个词）
     log('接口无职位，改为打开搜索页抓列表');
     for (const query of queries) {
       const pathKw = encodeURIComponent(query).replace(/%20/g, '');
@@ -849,37 +1474,27 @@ window.ResumeMatch = (() => {
         await chrome.tabs.update(tabId, { url });
         await waitTabComplete(tabId, 15000);
         await sleep(2500);
-        const pageRes = await chrome.scripting.executeScript({
-          target: { tabId },
-          world: 'MAIN',
-          func: () => {
-            const out = [];
-            const seen = new Set();
-            const add = (id, name, company, href) => {
-              if (!id || seen.has(id)) return;
-              seen.add(id);
-              out.push({ number: id, jobName: (name || '').trim(), companyName: (company || '').trim(), positionURL: href });
-            };
-            for (const a of document.querySelectorAll('a[href*="jobdetail"]')) {
-              const href = a.href || '';
-              const id = (href.match(/jobdetail\/([a-zA-Z0-9]+)/i) || [])[1] || '';
-              const card = a.closest('.joblist-box__item, li, article, [class*="job"]') || a;
-              const nameEl = card.querySelector('[class*="job-name"], [class*="jobName"], [class*="title"], h3');
-              const coEl = card.querySelector('[class*="company"], [class*="corp"]');
-              add(id, (nameEl && nameEl.textContent) || a.textContent || '', (coEl && coEl.textContent) || '', href);
-            }
-            return { n: out.length, jobs: out, hrefCount: document.querySelectorAll('a[href*="jobdetail"]').length };
-          },
-        });
-        const pageRaw = (pageRes && pageRes[0] && pageRes[0].result) || { n: 0, jobs: [] };
-        log('搜索页 ' + query + ' n=' + pageRaw.n + ' links=' + (pageRaw.hrefCount || 0));
-        mapped = mapped.concat(collectMappedZp(pageRaw.jobs));
+        const pageJobs = await scrapeZhaopinCurrentList(tabId, log);
+        log('搜索页 ' + query + ' n=' + pageJobs.length);
+        for (const job of pageJobs) {
+          if (!job.jobId || seen.has(job.jobId)) continue;
+          seen.add(job.jobId);
+          mappedAll.push(job);
+        }
       } catch (e) {
         log('打开搜索页失败 ' + query + ' ' + (e.message || e));
       }
     }
-    const seen = new Set();
-    return mapped.filter(j => { if (seen.has(j.jobId)) return false; seen.add(j.jobId); return true; });
+    return mappedAll;
+  }
+
+  async function searchZhaopinJobs(tabId, profile, log) {
+    log('按画像职位走接口搜索');
+    return searchZhaopinByQueries(tabId, profile, log, {
+      queries: profile.titles.slice(0, 4),
+      cityId: ZHAOPIN_CITY[profile.city] || '',
+      mode: '画像接口',
+    });
   }
 
   async function waitRefineTab(tabId, timeoutMs) {
@@ -1009,6 +1624,7 @@ window.ResumeMatch = (() => {
         }
         done++;
         report();
+        if (!stopped && done < total) await sleep(DETAIL_GAP_MS / REFINE_CONCURRENCY);
       }
     }
 
@@ -1024,11 +1640,15 @@ window.ResumeMatch = (() => {
   }
 
   async function runZhaopin({ tabId, log }) {
+    await loadOutsourceCompanies();
+    const appliedN = await loadAppliedLocal('zp');
     const loaded = await loadResume();
     log('简历文件: ' + loaded.file);
     const profile = extractProfile(loaded.text);
     log('画像 职位=' + profile.titles.join('/') + ' 城市=' + (profile.city || '未识别')
       + ' 技能=' + profile.skills.slice(0, 8).join(',') + ' 工作词=' + profile.workKeywords.slice(0, 8).join(','));
+    if ((outsourceNames || []).length) log('外包公司黑名单 ' + outsourceNames.length + ' 家');
+    if (appliedN) log('本地已投去重 ' + appliedN + ' 条');
 
     const listed = await searchZhaopinJobs(tabId, profile, log);
     if (!listed.length) {
@@ -1212,12 +1832,17 @@ window.ResumeMatch = (() => {
         const params = new URLSearchParams(location.search);
         const keyword = params.get('keyword') || '';
         const jobArea = params.get('jobArea') || '020000';
+        const sortType = params.get('sortType') || '0';
+          const activePageEl = document.querySelector('.el-pager li.number.active, .el-pagination li.active, .pager .active');
+        let pageNum = parseInt(String(activePageEl && activePageEl.textContent || params.get('pageNum') || '1').trim(), 10);
+        if (!Number.isFinite(pageNum) || pageNum < 1) pageNum = 1;
         if (cards.length) {
           const apiUrl = 'https://we.51job.com/api/job/search-pc?api_key=51job'
             + '&timestamp=' + Date.now()
             + '&keyword=' + encodeURIComponent(keyword)
             + '&searchType=2&jobArea=' + encodeURIComponent(jobArea)
-            + '&sortType=0&pageNum=1&pageSize=30&source=1&accountId=&scene=7';
+            + '&sortType=' + encodeURIComponent(sortType)
+            + '&pageNum=' + pageNum + '&pageSize=20&source=1&accountId=&scene=7';
           try {
             const apiRes = await fetch(apiUrl, {
               credentials: 'include',
@@ -1331,6 +1956,123 @@ window.ResumeMatch = (() => {
     return scrape51JobsFromDom(tabId, log);
   }
 
+  async function clickW51NextPage(tabId) {
+    try {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: () => {
+          const next = document.querySelector(
+            '.btn-next:not(.disabled), button.btn-next:not([disabled]), .el-pagination .btn-next:not(.disabled), li.number.active + li.number, a.next:not(.disabled)',
+          );
+          if (!next || next.disabled || /disabled|is-disabled/.test(next.className || '')) return false;
+          next.click();
+          return true;
+        },
+      });
+      return !!(res && res[0] && res[0].result);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** 当前页无职位 / 无新可投时翻页，最多 SEARCH_PAGES_MAX 页 */
+  async function collect51JobsPaging(tabId, profile, log) {
+    const passed = [];
+    const samples = [];
+    const excludeCounts = {};
+    let listedTotal = 0;
+    const pageSeen = new Set();
+
+    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+      if (page > 1) {
+        log('本页无新岗位，翻到第 ' + page + ' 页');
+        const moved = await clickW51NextPage(tabId);
+        if (!moved) {
+          log('没有下一页，停止翻页');
+          break;
+        }
+        await sleep(1200);
+        await waitW51ListDom(tabId, log, 12000);
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab.url) await chrome.storage.local.set({ w51_search_url: tab.url });
+        } catch (_) {}
+      }
+
+      const listed = await scrape51JobsFromDom(tabId, log);
+      if (!listed.length) {
+        log('第 ' + page + ' 页列表为 0');
+        continue;
+      }
+      listedTotal += listed.length;
+      let pageNew = 0;
+      for (const job of listed) {
+        const id = String(job.jobId || '');
+        if (id && pageSeen.has(id)) continue;
+        if (id) pageSeen.add(id);
+        const s = scoreList(job, profile);
+        job.score = s.score;
+        job.scoreDetail = s;
+        bumpWhy(excludeCounts, s.why);
+        if (samples.length < 5) {
+          samples.push((job.name || '(无标题)') + ' ' + s.score
+            + (job.company ? '|' + job.company : '')
+            + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')));
+        }
+        if (!s.veto && s.score >= LIST_THRESHOLD) {
+          passed.push(job);
+          pageNew++;
+        }
+      }
+      log('第 ' + page + ' 页可见 ' + listed.length + '，新增可投 ' + pageNew + '（累计 ' + passed.length + '）');
+      if (passed.length >= REFINE_MAX) break;
+      if (pageNew > 0) break; // 本页已有新岗，先精排这批；再点匹配会跳过它们并继续翻页
+    }
+
+    passed.sort((a, b) => b.score - a.score);
+    return { passed, samples, excludeCounts, listedTotal };
+  }
+
+  async function loadW51SkipIds(tabUrl) {
+    const appliedN = await loadAppliedLocal('w51');
+    let matchedN = 0;
+    try {
+      let kw = '';
+      try { kw = new URL(tabUrl || '').searchParams.get('keyword') || ''; } catch (_) {}
+      const s = await chrome.storage.local.get(['w51_matched_ids', 'w51_matched_kw']);
+      if (kw && s.w51_matched_kw && s.w51_matched_kw !== kw) {
+        await chrome.storage.local.set({ w51_matched_ids: [], w51_matched_kw: kw });
+      } else if (kw && !s.w51_matched_kw) {
+        await chrome.storage.local.set({ w51_matched_kw: kw });
+      }
+      const s2 = await chrome.storage.local.get('w51_matched_ids');
+      const arr = Array.isArray(s2.w51_matched_ids) ? s2.w51_matched_ids.map(String) : [];
+      matchedN = arr.length;
+      for (const id of arr) {
+        if (id) appliedLocal.add(id);
+      }
+    } catch (_) {}
+    return { appliedN, matchedN };
+  }
+
+  async function rememberW51Matched(jobs, tabUrl) {
+    try {
+      let kw = '';
+      try { kw = new URL(tabUrl || '').searchParams.get('keyword') || ''; } catch (_) {}
+      const s = await chrome.storage.local.get('w51_matched_ids');
+      let arr = Array.isArray(s.w51_matched_ids) ? s.w51_matched_ids.map(String) : [];
+      for (const j of jobs || []) {
+        const id = String(j.jobId || '').trim();
+        if (id && !arr.includes(id)) arr.push(id);
+      }
+      if (arr.length > 800) arr = arr.slice(-800);
+      const payload = { w51_matched_ids: arr };
+      if (kw) payload.w51_matched_kw = kw;
+      await chrome.storage.local.set(payload);
+    } catch (_) {}
+  }
+
   async function search51Jobs(tabId, profile, log) {
     const queries = profile.titles.slice(0, 4);
     const jobArea = JOB51_CITY[profile.city] || '020000';
@@ -1424,52 +2166,40 @@ window.ResumeMatch = (() => {
   }
 
   async function run51job({ tabId, log }) {
+    await loadOutsourceCompanies();
     const loaded = await loadResume();
     log('简历文件: ' + loaded.file);
     const profile = extractProfile(loaded.text);
     log('画像 职位=' + profile.titles.join('/') + ' 城市=' + (profile.city || '未识别')
       + ' 技能=' + profile.skills.slice(0, 8).join(',') + ' 工作词=' + profile.workKeywords.slice(0, 8).join(','));
+    if ((outsourceNames || []).length) log('外包公司黑名单 ' + outsourceNames.length + ' 家');
 
     await saveW51SearchCtx(profile);
     let tabUrl = '';
     try { tabUrl = (await chrome.tabs.get(tabId)).url || ''; } catch (_) {}
+    const skip = await loadW51SkipIds(tabUrl);
+    if (skip.appliedN) log('本地已投去重 ' + skip.appliedN + ' 条');
+    if (skip.matchedN) log('上次匹配已跳过 ' + skip.matchedN + ' 条');
     try {
       await chrome.storage.local.set({ w51_match_tab: tabId, w51_search_url: tabUrl });
     } catch (_) {}
-    log('按当前页列表匹配；投递在后台标签进行，不影响本页');
+    log('按列表匹配；本页无新岗会自动翻页（最多 ' + SEARCH_PAGES_MAX + ' 页）');
     if (!tabUrl.includes('we.51job.com')) {
       log('请先打开 we.51job.com 搜索页并手动搜出结果');
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
     await waitW51ListDom(tabId, log, 12000);
-    const listed = await scrape51JobsFromDom(tabId, log);
-    if (!listed.length) {
-      log('当前页列表为 0。请在前程搜索页手动搜索（如「测试工程师」+ 上海），看到职位后再点匹配。');
+    const collected = await collect51JobsPaging(tabId, profile, log);
+    const passed = collected.passed;
+    if (collected.samples.length) log('粗筛样例: ' + collected.samples.join(' | '));
+    logExcludes(log, collected.excludeCounts);
+    if (!collected.listedTotal) {
+      log('前 ' + SEARCH_PAGES_MAX + ' 页列表均为 0。请在前程搜索页手动搜索后看到职位再匹配。');
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
-    log('本页 ' + listed.length + ' 条，开始粗筛');
-
-    const passed = [];
-    const samples = [];
-    const excludeCounts = {};
-    for (const job of listed) {
-      const s = scoreList(job, profile);
-      job.score = s.score;
-      job.scoreDetail = s;
-      bumpWhy(excludeCounts, s.why);
-      if (samples.length < 5) {
-        samples.push((job.name || '(无标题)') + ' ' + s.score
-          + (job.company ? '|' + job.company : '')
-          + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')));
-      }
-      if (!s.veto && s.score >= LIST_THRESHOLD) passed.push(job);
-    }
-    passed.sort((a, b) => b.score - a.score);
-    if (samples.length) log('粗筛样例: ' + samples.join(' | '));
-    logExcludes(log, excludeCounts);
     log('粗筛留下 ' + passed.length + ' 条，对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条精排');
     if (!passed.length) {
-      log('前程匹配结果为 0 条。看样例：可能被校招/不可选中/派遣规则排除，或未过阈值 ' + LIST_THRESHOLD + '。');
+      log('前程匹配结果为 0 条。本页新岗已跳过或被规则排除，可手动翻页后再匹配。');
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
     const refineTop = passed.slice(0, REFINE_MAX);
@@ -1481,11 +2211,13 @@ window.ResumeMatch = (() => {
       log('前程精排后为 0 条，已回退粗筛前 ' + refineTop.length + ' 条');
       jobs = refineTop;
     }
+    try { tabUrl = (await chrome.tabs.get(tabId)).url || tabUrl; } catch (_) {}
+    await rememberW51Matched(jobs, tabUrl);
     return {
       jobs, profile, stopped: refined.stopped, fallback, listCount: passed.length,
       refineTotal: refineTop.length, refinePassed: fallback ? 0 : jobs.length,
     };
   }
 
-  return { loadResume, extractProfile, run, runZhaopin, run51job, LIST_THRESHOLD, REFINE_MAX, DEGREE_OPTS };
+  return { loadResume, extractProfile, run, runZhaopin, run51job, LIST_THRESHOLD, REFINE_MAX, DEGREE_OPTS, DIRECTION_OPTS };
 })();

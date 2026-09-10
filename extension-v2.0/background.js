@@ -12,6 +12,29 @@ function addLog(platform, logs, t, msg, color) {
   if (logs.length > LOG_LIMIT) logs.shift();
 }
 
+const APPLIED_CAP = 3000;
+
+async function rememberApplied(platform, id) {
+  id = String(id || '').trim();
+  if (!id || !platform) return;
+  const key = 'applied_ids_' + platform;
+  try {
+    const s = await chrome.storage.local.get(key);
+    let arr = Array.isArray(s[key]) ? s[key].map(String) : [];
+    if (arr.includes(id)) return;
+    arr.push(id);
+    if (arr.length > APPLIED_CAP) arr = arr.slice(-APPLIED_CAP);
+    await chrome.storage.local.set({ [key]: arr });
+  } catch (_) {}
+}
+
+async function bumpDayCount(platform) {
+  const today = new Date().toISOString().substring(0, 10);
+  const cntKey = platform + '_cnt_' + today;
+  const cnt = await chrome.storage.local.get(cntKey);
+  await chrome.storage.local.set({ [cntKey]: (cnt[cntKey] || 0) + 1 });
+}
+
 async function bossBatch(jobs, cookieStr, minInt, maxInt) {
   const progress = { running: true, idx: 0, total: jobs.length, okC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
   makeProgress('boss', progress);
@@ -49,11 +72,8 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
     else if (result.ok) {
       okC++;
       log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已发送'), '#4ade80');
-      const today = new Date().toISOString().substring(0, 10);
-      const cntKey = 'boss_cnt_' + today;
-      const cnt = await chrome.storage.local.get(cntKey);
-      const n = (cnt[cntKey] || 0) + 1;
-      await chrome.storage.local.set({ [cntKey]: n });
+      await rememberApplied('boss', encryptId);
+      await bumpDayCount('boss');
     }
     else {
       failC++;
@@ -126,11 +146,8 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
     else if (result.ok) {
       okC++;
       log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已投递'), '#4ade80');
-      const today = new Date().toISOString().substring(0, 10);
-      const cntKey = 'zp_cnt_' + today;
-      const cnt = await chrome.storage.local.get(cntKey);
-      const n = (cnt[cntKey] || 0) + 1;
-      await chrome.storage.local.set({ [cntKey]: n });
+      await rememberApplied('zp', jobNumber);
+      await bumpDayCount('zp');
     }
     else { failC++; log('[' + idx + '] ❌ ' + result.msg, '#f87171'); }
 
@@ -398,10 +415,8 @@ async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
       if (result.ok) {
         okC++;
         log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已投递'), '#4ade80');
-        const today = new Date().toISOString().substring(0, 10);
-        const cntKey = 'w51_cnt_' + today;
-        const cnt = await chrome.storage.local.get(cntKey);
-        await chrome.storage.local.set({ [cntKey]: (cnt[cntKey] || 0) + 1 });
+        await rememberApplied('w51', jobId);
+        await bumpDayCount('w51');
       } else {
         const skip = /简历投递|页面跳转/.test(result.msg || '');
         if (skip) {

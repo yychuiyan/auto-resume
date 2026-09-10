@@ -348,6 +348,9 @@ window.ResumeAI = (() => {
       degrees: profile.degrees !== undefined
         ? (Array.isArray(profile.degrees) ? profile.degrees : [])
         : (prev.degrees || []),
+      directions: profile.directions !== undefined
+        ? (Array.isArray(profile.directions) ? profile.directions : [])
+        : (prev.directions || []),
       fileName: (extra && extra.fileName) || prev.fileName || '',
       parsedAt: Date.now(),
     };

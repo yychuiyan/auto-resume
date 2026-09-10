@@ -34,6 +34,8 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .tabcnt{font-size:9px;font-weight:400;opacity:.75;margin-top:1px}
 .day-cnt{font-size:11px;color:#888;margin-bottom:6px}
 .day-cnt b{color:#e0e0e0}
+.linkbtn{margin-left:6px;padding:0;border:none;background:transparent;color:#60a5fa;font-size:10px;cursor:pointer;font-family:inherit}
+.linkbtn:hover{text-decoration:underline;color:#93c5fd}
 .tab.boss.active{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
 .tab.zp.active{background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff}
 .tab.w51.active{background:linear-gradient(135deg,#34d399,#059669);color:#fff}
@@ -177,6 +179,18 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
     </div>
     </div>
     <div class="field">
+      <label>方向</label>
+      <div class="msel" id="pfDirection">
+        <button type="button" class="msel-btn" id="pfDirectionBtn">全部</button>
+        <div class="msel-list" id="pfDirectionList">
+          <label><input type="checkbox" data-direction="__all__" checked> 全部</label>
+          <label><input type="checkbox" data-direction="软件" checked> 软件</label>
+          <label><input type="checkbox" data-direction="硬件" checked> 硬件</label>
+          <label><input type="checkbox" data-direction="AI测试" checked> AI 测试</label>
+        </div>
+      </div>
+    </div>
+    <div class="field">
       <label>技能（逗号或换行）</label>
       <textarea id="pfSkills" rows="4" placeholder="Python, Playwright, 接口测试"></textarea>
     </div>
@@ -199,9 +213,10 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 <div class="panel active boss" id="panelBoss">
   <div class="card">
     <div class="ttl">📄 按简历匹配拉取</div>
-    <div class="day-cnt">今日已投 <b id="dayBoss">0</b></div>
+    <div class="day-cnt">今日已投 <b id="dayBoss">0</b> · 本机去重 <b id="appliedBoss">0</b>
+      <button type="button" class="linkbtn" id="clearAppliedBoss" title="清空本机已投名单">清空</button></div>
     <button class="btn" id="btnMatch">📄 读取简历并匹配职位</button>
-    <div class="hint">优先用上方 AI 解析的画像。自动排除派遣/代招、校招、不可选中。粗筛后对前 20 条并发精排。需已登录 BOSS 页面。</div>
+    <div class="hint">优先用上方画像。有页面筛选就按筛选拉；否则按画像职位接口搜。再粗筛精排；本机已投下一轮跳过。</div>
     <div class="info" id="fetchInfo"></div>
     <div class="prog" id="matchProg" style="display:none;margin-top:6px">
       <div class="bar"><div class="fill" id="matchFill"></div></div>
@@ -231,9 +246,10 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 <div class="panel zp" id="panelZhaopin">
   <div class="card">
     <div class="ttl">📄 按简历匹配拉取</div>
-    <div class="day-cnt">今日已投 <b id="dayZp">0</b></div>
+    <div class="day-cnt">今日已投 <b id="dayZp">0</b> · 本机去重 <b id="appliedZp">0</b>
+      <button type="button" class="linkbtn" id="clearAppliedZp" title="清空本机已投名单">清空</button></div>
     <button class="btn zp" id="zBtnMatch">📄 读取简历并匹配职位</button>
-    <div class="hint">自动排除派遣/代招、校招、不可选中。粗筛后对前 20 条并发精排（4 路后台标签读 JD）。需已登录智联页面。</div>
+    <div class="hint">优先用上方画像，按职位接口搜。自动排除派遣/代招等；粗筛后精排；本机已投下一轮跳过。需已登录智联。</div>
     <div class="info" id="zFetchInfo"></div>
     <div class="prog" id="zMatchProg" style="display:none;margin-top:6px">
       <div class="bar"><div class="fill" id="zMatchFill"></div></div>
@@ -265,7 +281,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
     <div class="ttl">📄 按简历匹配拉取</div>
     <div class="day-cnt">今日已投 <b id="dayW51">0</b></div>
     <button class="btn w51" id="wBtnMatch">📄 读取简历并匹配职位</button>
-    <div class="hint">自动排除派遣/校招/网申/简历投递。匹配读当前搜索列表；投递在<strong>后台复制的搜索页</strong>点申请，本页不会跳走。刷新搜索页后需重新匹配。</div>
+    <div class="hint">自动排除派遣/校招/网申/简历投递。匹配读当前搜索列表；已匹配过的岗会跳过，本页无新岗自动翻页。换搜索关键词会重置「已匹配」记录。投递在<strong>后台复制的搜索页</strong>点申请。</div>
     <div class="info" id="wFetchInfo"></div>
     <div class="prog" id="wMatchProg" style="display:none;margin-top:6px">
       <div class="bar"><div class="fill" id="wMatchFill"></div></div>

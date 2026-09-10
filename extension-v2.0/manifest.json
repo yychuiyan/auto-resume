@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "简历投递助手",
-  "version": "2.0",
+  "version": "2.0.1",
   "description": "上传简历由 AI 解析匹配后，批量投递 BOSS / 智联 / 前程无忧",
   "permissions": ["storage", "tabs", "scripting", "cookies", "sidePanel"],
   "background": { "service_worker": "background.js" },

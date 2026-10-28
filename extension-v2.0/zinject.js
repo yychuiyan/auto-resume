@@ -176,6 +176,9 @@
     else if (acc.failN > 0 || acc.failMsg) success = false;
     else if (/^SUCCESS$/i.test(wrapMsg) && taskId && !d3.faceRecognition) success = true;
 
+    // 重复投递：平台提示已投过且没有新增成功记录，本轮没有真正投出
+    const dup = success && acc.successN === 0 && !!acc.already;
+
     const blockStr = data.blockInfo != null ? JSON.stringify(data.blockInfo).slice(0, 200) : '无';
     const dupNote = acc.already && !acc.successN ? '(重复)' : '';
     const detail = success
@@ -191,7 +194,7 @@
         + ' city=' + JSON.stringify(cityIds)
         + ' 附件=' + (attachFileId ? 'Y' : 'N')
         + ' okN=' + acc.successN + ' failN=' + acc.failN + ' repeatN=' + acc.repeatN));
-    window.postMessage({ __zl: true, id: cmd.id, ok: success, msg: detail }, '*');
+    window.postMessage({ __zl: true, id: cmd.id, ok: success, dup, msg: detail }, '*');
   } catch (e) {
     window.postMessage({ __zl: true, id: cmd.id, ok: false, msg: e.message }, '*');
   }

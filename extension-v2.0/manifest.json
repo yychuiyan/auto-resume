@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "简历投递助手",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "上传简历由 AI 解析匹配后，批量投递 BOSS / 智联 / 前程无忧",
   "permissions": ["storage", "tabs", "scripting", "cookies", "sidePanel"],
   "background": { "service_worker": "background.js" },
@@ -21,17 +21,12 @@
       "matches": ["*://*.zhaopin.com/*"],
       "js": ["zcontent.js"],
       "run_at": "document_idle"
-    },
-    {
-      "matches": ["*://*.51job.com/*"],
-      "js": ["wcontent.js"],
-      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inject.js", "zinject.js", "winject.js"],
-      "matches": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*", "*://*.51job.com/*"]
+      "resources": ["inject.js", "zinject.js"],
+      "matches": ["*://*.zhipin.com/*", "*://*.zhaopin.com/*"]
     }
   ],
   "icons": {

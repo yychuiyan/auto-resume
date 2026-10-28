@@ -12,7 +12,10 @@ function addLog(platform, logs, t, msg, color) {
   if (logs.length > LOG_LIMIT) logs.shift();
 }
 
-const APPLIED_CAP = 3000;
+// 本机已投名单上限：1 万条/平台
+// 占用约 BOSS 342KB、智联 146KB、前程 107KB，远低于 chrome.storage.local 的 10MB 配额，
+// 序列化耗时约 0.7ms，可忽略。超出后丢弃最旧的记录。
+const APPLIED_CAP = 10000;
 
 async function rememberApplied(platform, id) {
   id = String(id || '').trim();
@@ -28,18 +31,24 @@ async function rememberApplied(platform, id) {
   } catch (_) {}
 }
 
+// 侧边栏按本地日期取 key，这里必须一致（不能用 toISOString 的 UTC 日期）
+function todayKey() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
 async function bumpDayCount(platform) {
-  const today = new Date().toISOString().substring(0, 10);
-  const cntKey = platform + '_cnt_' + today;
+  const cntKey = platform + '_cnt_' + todayKey();
   const cnt = await chrome.storage.local.get(cntKey);
   await chrome.storage.local.set({ [cntKey]: (cnt[cntKey] || 0) + 1 });
 }
 
 async function bossBatch(jobs, cookieStr, minInt, maxInt) {
-  const progress = { running: true, idx: 0, total: jobs.length, okC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
+  const progress = { running: true, idx: 0, total: jobs.length, okC: 0, dupC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
   makeProgress('boss', progress);
 
-  let okC = 0, failC = 0;
+  let okC = 0, dupC = 0, failC = 0;
   const log = (m, c) => addLog('boss', progress.logs, new Date().toLocaleTimeString('zh-CN', { hour12: false }), m, c);
 
   log('=== 开始 ' + jobs.length + ' 个 ===', '#8b949e');
@@ -57,7 +66,7 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
     if (!encryptId) { failC++; log('[' + idx + '] ❌ 无法提取ID', '#f87171'); continue; }
 
     progress.idx = idx; progress.currentName = j.name; progress.status = '投递中...';
-    progress.okC = okC; progress.failC = failC;
+    progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
     makeProgress('boss', progress);
 
     const cmdId = Date.now() + '_' + idx;
@@ -69,6 +78,12 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
 
     const result = await waitStorage('result', cmdId, 15000);
     if (!result) { failC++; log('[' + idx + '] ❌ 超时', '#f87171'); }
+    else if (result.dup) {
+      // 平台提示已沟通：记入名单防重试，不计入今日已投
+      dupC++;
+      log('[' + idx + '] 🔁 ' + j.name + ' | 已沟通过，跳过', '#fbbf24');
+      await rememberApplied('boss', encryptId);
+    }
     else if (result.ok) {
       okC++;
       log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已发送'), '#4ade80');
@@ -84,7 +99,7 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
       }
     }
 
-    progress.okC = okC; progress.failC = failC;
+    progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
     makeProgress('boss', progress);
 
     if (i < jobs.length - 1) {
@@ -101,19 +116,19 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
     }
   }
 
-  log('=== ' + okC + '成功 / ' + failC + '失败 ===', '#8b949e');
+  log('=== ' + okC + '成功 / ' + failC + '失败' + (dupC ? ' / ' + dupC + '重复' : '') + ' ===', '#8b949e');
   progress.running = false;
-  progress.okC = okC; progress.failC = failC;
-  progress.status = okC + '成功 / ' + failC + '失败';
+  progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
+  progress.status = okC + '成功 / ' + failC + '失败' + (dupC ? ' / ' + dupC + '重复' : '');
   makeProgress('boss', progress);
   await chrome.storage.local.remove('cmd');
 }
 
 async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, minInt, maxInt) {
-  const progress = { running: true, idx: 0, total: jobs.length, okC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
+  const progress = { running: true, idx: 0, total: jobs.length, okC: 0, dupC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
   makeProgress('zp', progress);
 
-  let okC = 0, failC = 0;
+  let okC = 0, dupC = 0, failC = 0;
   const log = (m, c) => addLog('zp', progress.logs, new Date().toLocaleTimeString('zh-CN', { hour12: false }), m, c);
 
   log('=== 智联开始 ' + jobs.length + ' 个 ===', '#8b949e');
@@ -127,7 +142,7 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
     if (!jobNumber) { failC++; log('[' + idx + '] ❌ 缺少jobNumber', '#f87171'); continue; }
 
     progress.idx = idx; progress.currentName = j.name; progress.status = '投递中...';
-    progress.okC = okC; progress.failC = failC;
+    progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
     makeProgress('zp', progress);
 
     const cmdId = Date.now() + '_z' + idx;
@@ -141,8 +156,15 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
       actionId, cookies: cookieStr,
     }});
 
-    const result = await waitStorage('zresult', cmdId, 20000);
+    // 内容脚本 25s 才判超时，这里必须更久，否则真实投递会被判失败
+    const result = await waitStorage('zresult', cmdId, 30000);
     if (!result) { failC++; log('[' + idx + '] ❌ 超时', '#f87171'); }
+    else if (result.dup) {
+      // 平台说重复投递：记入本机名单避免下一轮重试，但不计入今日已投
+      dupC++;
+      log('[' + idx + '] 🔁 ' + j.name + ' | 已投过，跳过', '#fbbf24');
+      await rememberApplied('zp', jobNumber);
+    }
     else if (result.ok) {
       okC++;
       log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已投递'), '#4ade80');
@@ -151,7 +173,7 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
     }
     else { failC++; log('[' + idx + '] ❌ ' + result.msg, '#f87171'); }
 
-    progress.okC = okC; progress.failC = failC;
+    progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
     makeProgress('zp', progress);
 
     if (i < jobs.length - 1) {
@@ -168,10 +190,10 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
     }
   }
 
-  log('=== ' + okC + '成功 / ' + failC + '失败 ===', '#8b949e');
+  log('=== ' + okC + '成功 / ' + failC + '失败' + (dupC ? ' / ' + dupC + '重复' : '') + ' ===', '#8b949e');
   progress.running = false;
-  progress.okC = okC; progress.failC = failC;
-  progress.status = okC + '成功 / ' + failC + '失败';
+  progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
+  progress.status = okC + '成功 / ' + failC + '失败' + (dupC ? ' / ' + dupC + '重复' : '');
   makeProgress('zp', progress);
   await chrome.storage.local.remove('zcmd');
 }
@@ -186,19 +208,6 @@ async function waitTabLoad(tabId, timeoutMs) {
     await new Promise(r => setTimeout(r, 300));
   }
   return false;
-}
-
-async function w51EnsureSearchPage(tabId, searchUrl) {
-  if (!searchUrl) return;
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    const url = tab.url || '';
-    if (/xyz\.51job\.com|consumer\/pc\/resume/i.test(url) || !url.includes('/pc/search')) {
-      await chrome.tabs.update(tabId, { url: searchUrl });
-      await waitTabLoad(tabId, 20000);
-      await new Promise(r => setTimeout(r, 1200));
-    }
-  } catch (_) {}
 }
 
 async function waitW51List(tabId, timeoutMs) {
@@ -257,7 +266,7 @@ async function w51ApplyOnListTab(applyTabId, job) {
       const btn = card.querySelector('button.btn.apply, button.apply');
       if (!btn) return { ok: false, msg: '未找到申请按钮' };
       const txt = () => String(btn.textContent || btn.innerText || '').trim();
-      if (/已申请|已投递|重复申请/.test(txt())) return { ok: true, msg: '已投递' };
+      if (/已申请|已投递|重复申请/.test(txt())) return { ok: true, dup: true, msg: '已申请(重复)' };
       if (/网申|官网|外部|完善简历|选择简历|填写简历/.test(txt())) {
         return { ok: false, msg: '简历投递(按钮:' + txt() + ')' };
       }
@@ -325,11 +334,11 @@ async function w51ApplyOnListTab(applyTabId, job) {
   }
 }
 
-async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
-  const progress = { running: true, idx: 0, total: jobs.length, okC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
+async function w51Batch(jobs, tabId, minInt, maxInt, searchUrlHint) {
+  const progress = { running: true, idx: 0, total: jobs.length, okC: 0, dupC: 0, failC: 0, currentName: '', status: '准备中...', logs: [] };
   makeProgress('w51', progress);
 
-  let okC = 0, failC = 0;
+  let okC = 0, dupC = 0, failC = 0;
   const log = (m, c) => addLog('w51', progress.logs, new Date().toLocaleTimeString('zh-CN', { hour12: false }), m, c);
 
   if (!tabId) {
@@ -394,13 +403,13 @@ async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
       if (j.resumeFlow) {
         log('[' + idx + '] ⏭ ' + j.name + ' | 简历投递(匹配已过滤)', '#fbbf24');
         progress.idx = idx; progress.currentName = j.name;
-        progress.okC = okC; progress.failC = failC;
+        progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
         makeProgress('w51', progress);
         continue;
       }
 
       progress.idx = idx; progress.currentName = j.name; progress.status = '投递中...';
-      progress.okC = okC; progress.failC = failC;
+      progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
       makeProgress('w51', progress);
 
       let result;
@@ -412,7 +421,12 @@ async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
         result = { ok: false, msg: e.message || String(e) };
         await resetApplyTab();
       }
-      if (result.ok) {
+      if (result.dup) {
+        // 平台判定重复投递：记入名单防重试，不计入今日已投
+        dupC++;
+        log('[' + idx + '] 🔁 ' + j.name + ' | 已投过，跳过', '#fbbf24');
+        await rememberApplied('w51', jobId);
+      } else if (result.ok) {
         okC++;
         log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已投递'), '#4ade80');
         await rememberApplied('w51', jobId);
@@ -427,7 +441,7 @@ async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
         }
       }
 
-      progress.okC = okC; progress.failC = failC;
+      progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
       makeProgress('w51', progress);
 
       if (i < jobs.length - 1) {
@@ -444,10 +458,10 @@ async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
       }
     }
 
-    log('=== ' + okC + '成功 / ' + failC + '失败 ===', '#8b949e');
+    log('=== ' + okC + '成功 / ' + failC + '失败' + (dupC ? ' / ' + dupC + '重复' : '') + ' ===', '#8b949e');
     progress.running = false;
-    progress.okC = okC; progress.failC = failC;
-    progress.status = okC + '成功 / ' + failC + '失败';
+    progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
+    progress.status = okC + '成功 / ' + failC + '失败' + (dupC ? ' / ' + dupC + '重复' : '');
     makeProgress('w51', progress);
   } catch (e) {
     log('❌ 批量异常: ' + (e.message || ''), '#f87171');
@@ -458,7 +472,6 @@ async function w51Batch(jobs, cookieStr, tabId, minInt, maxInt, searchUrlHint) {
     if (applyTabId) {
       try { await chrome.tabs.remove(applyTabId); } catch (_) {}
     }
-    await chrome.storage.local.remove('wcmd');
   }
 }
 
@@ -488,17 +501,57 @@ function sidePanelPath(_site) {
   return 'popup.html';
 }
 
+// 只有这三个站才需要侧栏
+const SUPPORTED_SITES = ['boss', 'zhaopin', '51job'];
+
+// 浏览器内部页面（chrome://、扩展页、新标签页等）拿不到有效 URL，跳过判断
+function isBrowserPage(url) {
+  const u = String(url || '');
+  if (!u) return true;
+  return /^(chrome|edge|brave|opera|about|devtools|view-source|chrome-extension|moz-extension):/i.test(u);
+}
+
+function isSupportedSite(url) {
+  return SUPPORTED_SITES.indexOf(siteFromUrl(url)) >= 0;
+}
+
+// 关闭侧栏。优先用 Chrome 141+ 的 sidePanel.close()；
+// 老版本没有这个 API，退回到「把这个 tab 的侧栏禁用」——禁用会让面板在该 tab 收起。
+async function closeSidePanel(tabId, windowId) {
+  const api = chrome.sidePanel;
+  if (!api) return false;
+  if (typeof api.close === 'function') {
+    if (tabId) {
+      try { await api.close({ tabId }); return true; } catch (_) {}
+    }
+    if (windowId) {
+      try { await api.close({ windowId }); return true; } catch (_) {}
+    }
+  }
+  return false;
+}
+
 async function syncSidePanel(tabId, url) {
   if (!tabId || tabId < 0) return;
-  const u = url || '';
-  if (u.startsWith('chrome://') || u.startsWith('chrome-extension://')) return;
-  try {
-    await chrome.sidePanel.setOptions({
-      tabId,
-      path: sidePanelPath(siteFromUrl(u)),
-      enabled: true,
-    });
-  } catch (_) {}
+  if (!chrome.sidePanel?.setOptions) return;
+  const u = String(url || '');
+  if (isBrowserPage(u)) return;
+  if (isSupportedSite(u)) {
+    try {
+      await chrome.sidePanel.setOptions({
+        tabId,
+        path: sidePanelPath(siteFromUrl(u)),
+        enabled: true,
+      });
+    } catch (_) {}
+    return;
+  }
+  // 不在招聘站：先收起已打开的面板，再把该 tab 的侧栏禁用，
+  // 这样点扩展图标也不会在这类页面上弹出来
+  let windowId = 0;
+  try { windowId = (await chrome.tabs.get(tabId)).windowId; } catch (_) {}
+  await closeSidePanel(tabId, windowId);
+  try { await chrome.sidePanel.setOptions({ tabId, enabled: false }); } catch (_) {}
 }
 
 function initSidePanel() {
@@ -518,8 +571,9 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (info.status !== 'complete') return;
-  syncSidePanel(tabId, tab.url);
+  // URL 变化（含站内跳转）和加载完成都要重新判断，站内跳转不一定触发 status
+  if (info.status !== 'complete' && !info.url) return;
+  syncSidePanel(tabId, (info.url || (tab && tab.url) || ''));
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -530,7 +584,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     zpBatch(msg.jobs, msg.cookieStr, msg.at, msg.rt, msg.resumeNumber, msg.cityIds, msg.staffId, msg.min, msg.max);
     sendResponse({ ok: true });
   } else if (msg.action === 'w51_start') {
-    w51Batch(msg.jobs, msg.cookieStr, msg.tabId, msg.min, msg.max, msg.searchUrl);
+    w51Batch(msg.jobs, msg.tabId, msg.min, msg.max, msg.searchUrl);
     sendResponse({ ok: true });
   }
 });

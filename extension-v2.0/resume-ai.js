@@ -140,13 +140,88 @@ window.ResumeAI = (() => {
     }
   }
 
+  // 方向关键词过滤：泛词对区分方向没有任何信息量，
+  // 留着会让「座舱自动化测试工程师」被判成「自动化测试」。AI 偶尔仍会吐出来，这里兜一层。
+  const GENERIC_KEYWORDS = new Set([
+    '工程师', '测试', '开发', '设计', '经理', '主管', '专员', '助理', '专家',
+    '产品', '运营', '项目', '高级', '资深', '中级', '初级', '首席', '实习', '全职',
+    '工作', '岗位', '职位', '技术', '业务', '相关', '经验',
+  ]);
+
+  function cleanKeywords(list) {
+    const out = [];
+    for (const raw of [].concat(list || [])) {
+      const w = String(raw || '').trim();
+      if (!w || w.length > 20) continue;
+      if (GENERIC_KEYWORDS.has(w)) continue;
+      if (out.some(x => x.toLowerCase() === w.toLowerCase())) continue;
+      if (out.length >= 14) break;
+      out.push(w);
+    }
+    return out;
+  }
+
+  // 名字 → 关键词数组，去掉泛词与空项
+  function cleanKeywordMap(map) {
+    const out = {};
+    if (!map || typeof map !== 'object') return out;
+    for (const k of Object.keys(map)) {
+      const name = String(k || '').trim();
+      if (!name) continue;
+      const words = cleanKeywords(map[k]);
+      if (words.length) out[name] = words;
+    }
+    return out;
+  }
+
+  // AI 的方向输出兼容三种形状：
+  //   [{name, keywords}]  /  ['名字']  /  {名字: ['词']}
+  // 统一成 { names: [...], keywords: { 名字: [...] } }
+  function readDirections(raw) {
+    const names = [];
+    const keywords = {};
+    const push = (name, words) => {
+      const n = String(name || '').trim().slice(0, 12);
+      if (!n || n === '__all__') return;
+      if (names.some(x => x.toLowerCase() === n.toLowerCase())) return;
+      if (names.length >= 8) return;
+      names.push(n);
+      keywords[n] = cleanKeywords(words);
+    };
+    if (!raw) return { names, keywords };
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        if (item == null) continue;
+        if (typeof item === 'string') push(item, [item]);
+        else if (typeof item === 'object') {
+          push(item.name || item.title || '', item.keywords || item.words || item.synonyms || [item.name || item.title]);
+        }
+      }
+      return { names, keywords };
+    }
+    if (typeof raw === 'object') {
+      for (const k of Object.keys(raw)) push(k, raw[k]);
+    }
+    return { names, keywords };
+  }
+
   function profileFromParsed(parsed) {
     const titles = [].concat(parsed.titles || parsed.title || []).map(x => String(x || '').trim()).filter(Boolean);
     const skills = [].concat(parsed.skills || []).map(x => String(x || '').trim()).filter(Boolean);
     const workKeywords = [].concat(parsed.workKeywords || parsed.work || []).map(x => String(x || '').trim()).filter(Boolean);
     const city = String(parsed.city || '').replace(/市$/, '').trim();
     if (!titles.length) throw new Error('AI 未解析出期望职位');
-    return { titles, city, skills, workKeywords };
+    const dir = readDirections(parsed.directions);
+    const other = readDirections(parsed.otherDirections);
+    const hasDirs = parsed.directions !== undefined;
+    return {
+      titles, city, skills, workKeywords,
+      directions: hasDirs ? dir.names : undefined,
+      directionOptions: hasDirs ? dir.names.slice() : undefined,
+      // 重新解析时以这次结果为准：这次没给关键词就清空，别让上一次的旧词残留
+      directionKeywords: hasDirs ? dir.keywords : undefined,
+      otherDirections: parsed.otherDirections === undefined ? undefined : other.keywords,
+    };
   }
 
   function deltaThinking(delta) {
@@ -241,7 +316,23 @@ window.ResumeAI = (() => {
     const messages = [
       {
         role: 'system',
-        content: '你是简历解析器。先在思考过程里归纳简历要点，最终只输出一个紧凑 JSON 对象，不要 markdown，不要解释。字段：titles(字符串数组,3到5个求职职位近义名)、city(单个城市名,不要“市”字)、skills(技能数组,最多15个)、workKeywords(工作内容关键词数组,8到15个)。不要编造简历没有的技能。',
+        content: '你是简历解析器。先在思考过程里归纳简历要点，最终只输出一个紧凑 JSON 对象，不要 markdown，不要解释。'
+          + '字段：titles(字符串数组,3到5个求职职位近义名)、city(单个城市名,不要“市”字)、'
+          + 'skills(技能数组,最多15个)、workKeywords(工作内容关键词数组,8到15个)、'
+          + 'directions(数组,2到6项)、otherDirections(对象)。'
+          + 'directions 的每一项是 {"name":"方向名","keywords":["关键词"]}：'
+          + 'name 要从这份简历里归纳出他真正在做的岗位方向，2到8字，用该行业最通行的叫法（例如 交互设计、用户研究、软件测试、自动化测试、后端、数据分析、财务会计、新媒体运营），'
+          + '不局限于互联网技术岗，任何职业都可以；'
+          + 'keywords 给4到10个这个词方向专属的检索词，包含岗位标题里常见的同义说法与中英写法（例如 交互设计 → 交互设计、UX、用户体验、原型、Axure、信息架构）。'
+          + 'keywords 严禁使用 工程师、测试、开发、设计、产品、运营、经理、专员、高级、资深、自动化、相关、经验 这类没有区分度的泛词，'
+          + '否则同族方向会互相抢；要能靠这些词把本方向与相邻方向区分开。'
+          + 'otherDirections 是对象 {"相邻方向名":["关键词"]}，给5到8个与本简历同领域、但这份简历并不符合的方向及其专属词，'
+          + '用来在匹配时把这类岗位排除掉；它的关键词规则与 directions 相同。'
+          + 'otherDirections 要优先列出「最容易被本简历方向的词吞并、但其实是另一行」的那些岗位族，'
+          + '并把它们的行话写进关键词（例如做软件测试的简历，要给出 硬件测试/汽车电子测试，'
+          + '关键词含 座舱、车载、台架、HIL、CAN、BMS、GTS、示波器、PCB 这类；'
+          + '做交互设计的简历，要给出 视觉设计、产品经理、平面设计）。'
+          + '按简历实际情况归纳，不要编造简历里没有的技能。',
       },
       {
         role: 'user',
@@ -338,6 +429,29 @@ window.ResumeAI = (() => {
 
   async function saveProfile(profile, extra) {
     const prev = (await chrome.storage.local.get('ai_profile')).ai_profile || {};
+    const dirs = profile.directions !== undefined
+      ? (Array.isArray(profile.directions) ? profile.directions : [])
+      : (prev.directions || []);
+    // 候选方向以这次的结果为准：重新解析后，简历没解析到的方向不再保留
+    let dirOpts;
+    if (profile.directionOptions !== undefined) {
+      dirOpts = Array.isArray(profile.directionOptions) ? profile.directionOptions.slice() : [];
+    } else if (profile.directions !== undefined) {
+      dirOpts = Array.isArray(profile.directions) ? profile.directions.slice() : [];
+    } else {
+      dirOpts = Array.isArray(prev.directionOptions) ? prev.directionOptions : [];
+    }
+    // 重新解析时 AI 会给整套新关键词，要以新结果为准；
+    // 只是改匹配规则时（没带 keywords）沿用旧的，别把用户手改的词冲掉
+    const reParsed = profile.directionKeywords !== undefined;
+    const dirKeywords = reParsed
+      ? cleanKeywordMap(profile.directionKeywords)
+      : (prev.directionKeywords && typeof prev.directionKeywords === 'object' ? prev.directionKeywords : {});
+    // 相邻干扰方向只在「重新解析」时由 AI 给出；没给就等于这次没有，
+    // 不能沿用上一份简历的旧方向，否则换行业后会被它误杀
+    const otherDirections = profile.otherDirections !== undefined
+      ? cleanKeywordMap(profile.otherDirections)
+      : {};
     const data = {
       titles: profile.titles,
       city: profile.city || '',
@@ -348,11 +462,13 @@ window.ResumeAI = (() => {
       degrees: profile.degrees !== undefined
         ? (Array.isArray(profile.degrees) ? profile.degrees : [])
         : (prev.degrees || []),
-      directions: profile.directions !== undefined
-        ? (Array.isArray(profile.directions) ? profile.directions : [])
-        : (prev.directions || []),
+      directions: dirs,
+      directionOptions: dirOpts,
+      directionKeywords: dirKeywords,
+      otherDirections,
       fileName: (extra && extra.fileName) || prev.fileName || '',
-      parsedAt: Date.now(),
+      // 只改匹配规则时沿用上次解析时间，别让侧边栏显示成「刚解析过」
+      parsedAt: (extra && extra.keepParsedAt && prev.parsedAt) ? prev.parsedAt : Date.now(),
     };
     await chrome.storage.local.set({ ai_profile: data });
     return data;

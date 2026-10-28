@@ -30,7 +30,7 @@
     const handler = (e) => {
       if (e.data?.__boss && e.data.id === cmd.id) {
         window.removeEventListener('message', handler);
-        chrome.storage.local.set({ result: { id: e.data.id, ok: e.data.ok, msg: e.data.msg } });
+        chrome.storage.local.set({ result: { id: e.data.id, ok: e.data.ok, dup: !!e.data.dup, msg: e.data.msg } });
         div.remove();
         processing = false;
       }

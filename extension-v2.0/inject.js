@@ -69,7 +69,13 @@
     const r2 = await fetch('/wapi/zpgeek/friend/add.json?' + qs, { headers: h });
     const d2 = await r2.json();
 
-    window.postMessage({ __boss: true, id: cmd.id, ok: d2.code === 0, msg: d2.code === 0 ? '已发送' : (d2.message || 'code=' + d2.code) }, '*');
+    const ok2 = d2.code === 0;
+    const msg2 = ok2 ? '已发送' : (d2.message || 'code=' + d2.code);
+    // 平台提示已沟通过：视为「已投过」，不算新的成功
+    const DUP_MSG = /已(经)?(和|与)对方(沟通|打招呼|联系)|已经打过招呼|请勿重复|重复(沟通|打招呼|投递)|已沟通过/;
+    const dup2 = !ok2 && DUP_MSG.test(msg2);
+
+    window.postMessage({ __boss: true, id: cmd.id, ok: ok2, dup: dup2, msg: msg2 }, '*');
   } catch (e) {
     window.postMessage({ __boss: true, id: cmd.id, ok: false, msg: e.message }, '*');
   }

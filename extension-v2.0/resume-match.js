@@ -5,7 +5,11 @@ window.ResumeMatch = (() => {
   const REFINE_CONCURRENCY = 4;
   const SEARCH_PAGES = 2;
   const SEARCH_PAGES_MAX = 5;
+  // 已投太多、池子被投空时自动加深翻页
+  const SEARCH_PAGES_DEEP = 12;
   const SEARCH_FRESH_TARGET = 40;
+  // 粗筛为 0 时换关键词兜底的触发阈值
+  const FALLBACK_MIN = 1;
   const DETAIL_GAP_MS = 1500;
   const JOB51_SORT_LATEST = '1';
 
@@ -49,6 +53,73 @@ window.ResumeMatch = (() => {
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // ── BOSS 限流（code=37）──────────────────────────────────────────────
+  // 同一个页面文档里只够搜一轮：第二轮 joblist 接口一律回 code=37、n=0，
+  // 必须刷新出新的页面令牌才能再搜。用 performance.timeOrigin 判断
+  // 是不是同一个文档，比记时间戳准（用户手动刷新过就不会再白刷一次）。
+  let lastSearchBlock = null;
+
+  async function bossPageStamp(tabId) {
+    try {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: () => ({ t: Math.round(performance.timeOrigin), href: location.href }),
+      });
+      return (res && res[0] && res[0].result) || null;
+    } catch (_) { return null; }
+  }
+
+  // 只存一份「当前标签页 + 文档」记录：按 tabId 分开存会在 storage 里越攒越多，
+  // 而同一时间只会用到一个 BOSS 标签页。
+  const STAMP_KEY = 'boss_used_page';
+
+  async function readUsedStamp(tabId) {
+    try {
+      const s = await chrome.storage.local.get(STAMP_KEY);
+      const rec = s[STAMP_KEY];
+      return rec && Number(rec.tabId) === Number(tabId) ? rec : null;
+    } catch (_) { return null; }
+  }
+
+  async function markUsedStamp(tabId) {
+    try {
+      const st = await bossPageStamp(tabId);
+      if (!st) return;
+      await chrome.storage.local.set({ [STAMP_KEY]: { tabId, t: st.t, href: st.href } });
+    } catch (_) {}
+  }
+
+  // 刷新并等到「确实是新文档」：只看 status==='complete' 会误判——
+  // 刚调 reload 的那一瞬间 status 还是旧的 complete。用 timeOrigin 变了才算数。
+  async function reloadBossTab(tabId, log, why) {
+    log(why + '，刷新页面拿到新令牌后重试');
+    const before = await bossPageStamp(tabId);
+    try { await chrome.tabs.reload(tabId); } catch (e) {
+      log('刷新失败: ' + (e.message || e));
+      return null;
+    }
+    const start = Date.now();
+    let fresh = null;
+    while (Date.now() - start < 20000) {
+      await sleep(400);
+      let tab = null;
+      try { tab = await chrome.tabs.get(tabId); } catch (_) { return null; }
+      if (!tab) return null;
+      const st = await bossPageStamp(tabId);
+      const changed = !before || (st && st.t !== before.t);
+      if (changed && tab.status === 'complete') { fresh = st; break; }
+    }
+    if (!fresh) {
+      log('页面刷新后还是旧文档，可能被别的操作打断，继续用当前页面搜索');
+      return null;
+    }
+    // 页面自己的 joblist 请求先跑完，别跟它抢令牌
+    await sleep(1500);
+    log('页面已刷新，重新搜索');
+    return fresh;
+  }
+
   async function loadResume() {
     try {
       const s = await chrome.storage.local.get('ai_profile');
@@ -65,6 +136,9 @@ window.ResumeMatch = (() => {
             scaleMin: p.scaleMin || 0,
             degrees: p.degrees || [],
             directions: p.directions || [],
+            directionOptions: p.directionOptions || [],
+            directionKeywords: p.directionKeywords,
+            otherDirections: p.otherDirections,
           }),
         };
       }
@@ -93,6 +167,13 @@ window.ResumeMatch = (() => {
     if (raw.startsWith('{')) {
       try {
         const j = JSON.parse(raw);
+        const dirFromAi = parseAiDirections(j.directions);
+        const dirOpts = normalizeDirectionOptions(j.directionOptions);
+        // directions 一律当作用户勾选原样保留：AI 解析出来的那一次就是「全部勾上」的默认值，
+        // 之后由用户在 UI 里增删。清空它会让方向硬排除退化成「不限」。
+        const dirs = dirFromAi ? dirFromAi.options : j.directions;
+        // AI 可能直接给 [{name, keywords}]，关键词要一并接住
+        const kwFromAi = directionKeywordsFromAi(j.directions);
         return normalizeProfile({
           titles: j.titles || j.title || [],
           city: j.city || '',
@@ -101,7 +182,10 @@ window.ResumeMatch = (() => {
           salaryMin: j.salaryMin,
           scaleMin: j.scaleMin,
           degrees: j.degrees,
-          directions: j.directions,
+          directions: dirs,
+          directionOptions: dirOpts.length ? dirOpts : (dirFromAi ? dirFromAi.options : undefined),
+          directionKeywords: Object.keys(kwFromAi).length ? kwFromAi : j.directionKeywords,
+          otherDirections: j.otherDirections,
         });
       } catch (_) {}
     }
@@ -155,14 +239,186 @@ window.ResumeMatch = (() => {
       salaryMin: salaryMinK(p.salaryMin), scaleMin: salaryMinK(p.scaleMin),
       degrees: p.degrees === undefined ? undefined : normalizeDegrees(p.degrees),
       directions: p.directions === undefined ? undefined : normalizeDirections(p.directions),
+      directionOptions: p.directionOptions === undefined
+        ? (p.directions === undefined ? undefined : normalizeDirectionOptions(p.directions))
+        : normalizeDirectionOptions(p.directionOptions),
+      // 方向名 → 专属关键词，AI 生成 + 用户可改
+      directionKeywords: p.directionKeywords === undefined
+        ? undefined
+        : cleanKeywordMap(p.directionKeywords),
+      // 同领域但不匹配的相邻方向，只参与判定、不进下拉
+      otherDirections: p.otherDirections === undefined
+        ? undefined
+        : cleanKeywordMap(p.otherDirections),
     };
   }
 
+  // 文字搜索词清洗：去掉泛词和空项
+  function cleanKeywords(list) {
+    const out = [];
+    for (const raw of [].concat(list || [])) {
+      const w = String(raw || '').trim();
+      if (!w || w.length > 20) continue;
+      if (DIRECTION_GENERIC_WORDS.has(w)) continue;
+      if (out.some(x => x.toLowerCase() === w.toLowerCase())) continue;
+      if (out.length >= 14) break;
+      out.push(w);
+    }
+    return out;
+  }
+
+  function cleanKeywordMap(map) {
+    const out = {};
+    if (!map || typeof map !== 'object') return out;
+    for (const k of Object.keys(map)) {
+      const name = String(k || '').trim();
+      if (!name) continue;
+      const words = cleanKeywords(map[k]);
+      if (words.length) out[name] = words;
+    }
+    return out;
+  }
+
   const DEGREE_OPTS = ['高中', '中专', '大专', '本科', '硕士', '博士'];
-  const DIRECTION_OPTS = ['软件', '硬件', 'AI测试'];
-  const HARDWARE_RE = /硬件|单片机|嵌入式|固件|FPGA|PCB|电路|芯片|射频|模拟电路|数字电路|MCU|示波器|焊接|原理图|板级/;
-  const AI_TEST_RE = /大模型|LLM|AIGC|生成式|Prompt|RAG|Agent|多模态|向量库|Embedding|模型评测|幻觉|Token|微调|SFT|对齐|AI\s*测试|智能化测试|AI测试/;
-  const SOFTWARE_RE = /软件|后端|前端|服务端|接口测试|自动化|Python|Java|Web|微服务|数据库|测试开发|质量保障|Playwright|pytest|UI自动化|功能测试/;
+
+  // 方向不再有内置词表：AI 按简历自由生成方向名 + 专属关键词，
+  // 用户可改词、可新增。判定全部本地跑，匹配时不再调用 AI。
+  const DIRECTION_MAX_OPTS = 40;
+
+  // 泛词：对区分方向没有信息量，留着会让同族方向互相抢
+  // （「座舱自动化测试工程师」里的「自动化」会把汽车岗吸到自动化测试上）
+  const DIRECTION_GENERIC_TOKENS = [
+    '高级', '资深', '中级', '初级', '首席', '专家', '主管', '助理', '专员', '经理',
+    '工程师', '开发', '测试', '设计', '产品', '运营', '项目', '技术', '业务', '岗',
+  ];
+  const DIRECTION_GENERIC_WORDS = new Set([
+    ...DIRECTION_GENERIC_TOKENS,
+    '自动化', '智能化', '工程师', '实习', '全职', '兼职', '工作', '职位', '岗位',
+    '相关', '经验', '方向', '领域', '行业', '综合', '体验', '管理', '服务',
+  ]);
+
+  // 方向关键词：AI 给的优先；没给过（老画像 / 用户新加还没填词）就退回名字本身。
+  // 给了词也把名字带上——AI 漏写方向名时，「硬件测试工程师」这种直写方向名的
+  // 岗位就一个词都命中不了，反而漏过。纯泛名（自动化测试/测试工程师）不带，
+  // 带上只会跟同族方向抢。
+  function directionKeywordsOf(name, profile) {
+    const n = String(name || '').trim();
+    if (!n) return [];
+    const kw = profile && profile.directionKeywords && profile.directionKeywords[n];
+    if (Array.isArray(kw) && kw.length) return withName(kw.slice(), n);
+    const other = profile && profile.otherDirections && profile.otherDirections[n];
+    if (Array.isArray(other) && other.length) return withName(other.slice(), n);
+    return [n];
+  }
+
+  function withName(words, name) {
+    if (directionCoreOf(name) === '') return words;
+    const key = String(name).toLowerCase();
+    if (words.some(w => String(w).toLowerCase() === key)) return words;
+    words.push(name);
+    return words;
+  }
+
+
+
+  function directionCoreOf(name) {
+    let s = String(name || '').toLowerCase();
+    for (const t of DIRECTION_GENERIC_TOKENS) s = s.split(t).join('');
+    return s.replace(/[\s\-_/\\（）()·、,，]+/g, '');
+  }
+
+  // 名字去掉通用词后什么都不剩 → 泛名，不具判定力。
+  // 但 AI 给过专属关键词的方向要照常参与判定（「产品经理」这种名字里带泛词，
+  // 可它的关键词是有区分度的，不能因为名字被跳过）。
+  function isGenericDirectionName(name, profile) {
+    const n = String(name || '').trim();
+    if (!n) return true;
+    const words = directionKeywordsOf(n, profile);
+    if (words.length > 1) return false;
+    return directionCoreOf(n) === '';
+  }
+
+  // 最长命中词长度：命中数和位置都打平时用这个
+  function longestHit(text, words) {
+    const low = String(text || '').toLowerCase();
+    let best = 0;
+    for (const w of words || []) {
+      const k = String(w || '').toLowerCase();
+      if (k && low.includes(k) && k.length > best) best = k.length;
+    }
+    return best;
+  }
+
+  // 命中词在文本里首次出现的位置；越小越靠前。
+  // 中文岗位名基本是「领域限定 + 职能」，「座舱自动化测试」里靠前的
+  // 「座舱」才是区分方向的词，靠后的「自动化测试」只是职能。
+  function firstHitIndex(text, words) {
+    const low = String(text || '').toLowerCase();
+    let best = -1;
+    for (const w of words || []) {
+      const k = String(w || '').toLowerCase();
+      if (!k) continue;
+      const i = low.indexOf(k);
+      if (i < 0) continue;
+      if (best < 0 || i < best) best = i;
+    }
+    return best < 0 ? 999 : best;
+  }
+
+  // 统一成一维方向名数组，兼容：字符串 / 字符串数组 / {name} 对象数组
+  function normalizeDirectionOptions(list) {
+    const out = [];
+    for (const item of [].concat(list || [])) {
+      if (item == null) continue;
+      const n = typeof item === 'object'
+        ? String(item.name || item.title || '').trim()
+        : String(item || '').trim();
+      if (!n || n === '__all__') continue;
+      if (out.length >= DIRECTION_MAX_OPTS) continue;
+      if (out.some(x => x.toLowerCase() === n.toLowerCase())) continue;
+      out.push(n);
+    }
+    return out;
+  }
+
+  // AI 返回方向名数组 → 候选列表只保留简历命中的方向，不再补内置全量
+  function directionOptionsFromAI(names) {
+    const picked = normalizeDirectionOptions(names);
+    return picked.length ? { options: picked, selected: picked } : null;
+  }
+
+  // AI 直接给成 [{name,keywords}] 时，把关键词也一起取出来
+  function directionKeywordsFromAi(dir) {
+    const out = {};
+    if (!Array.isArray(dir)) return out;
+    for (const item of dir) {
+      if (!item || typeof item !== 'object') continue;
+      const n = String(item.name || item.title || '').trim();
+      if (!n) continue;
+      const words = cleanKeywords([].concat(item.keywords || item.words || item.synonyms || []));
+      if (words.length) out[n] = words;
+    }
+    return out;
+  }
+
+  // 兼容 AI 给出的多种形状：数组 / {categories,subs} / 字符串
+  function parseAiDirections(dir) {
+    if (!dir) return null;
+    if (Array.isArray(dir)) return directionOptionsFromAI(dir);
+    if (typeof dir !== 'object') return directionOptionsFromAI([String(dir)]);
+    const subs = dir.subs || dir.subDirections || dir.details || dir.children || null;
+    const cats = dir.categories || dir.cats || dir.main || null;
+    if (subs && [].concat(subs).length) return directionOptionsFromAI([].concat(subs));
+    return directionOptionsFromAI([].concat(cats || []));
+  }
+
+  // 候选方向 = AI 从简历解析出的 + 用户手工新增的，两处合并去重
+  function directionOptionsOf(profile) {
+    return uniq([].concat(
+      normalizeDirectionOptions(profile && profile.directionOptions),
+      normalizeDirectionOptions(profile && profile.directions),
+    ));
+  }
 
   function normalizeDegrees(list) {
     const want = uniq([].concat(list || []).filter(d => DEGREE_OPTS.indexOf(String(d)) >= 0));
@@ -205,10 +461,34 @@ window.ResumeMatch = (() => {
     return !tags.some(t => want.indexOf(t) >= 0);
   }
 
+  // 勾选集：只有「一条都没勾」才算不限方向；勾了就是只匹配这些方向
+  function directionSelection(profile, opts) {
+    const picked = normalizeDirections(profile && profile.directions);
+    if (!picked.length) return { picked: new Set(opts), unlimited: true };
+    return { picked: new Set(picked), unlimited: false };
+  }
+
   function normalizeDirections(list) {
-    const want = uniq([].concat(list || []).filter(d => DIRECTION_OPTS.indexOf(String(d)) >= 0));
-    if (!want.length || want.length >= DIRECTION_OPTS.length) return [];
-    return want;
+    const out = [];
+    for (const item of [].concat(list || [])) {
+      const n = typeof item === 'object'
+        ? String((item && (item.name || item.title)) || '').trim()
+        : String(item || '').trim();
+      if (!n || n === '__all__') continue;
+      if (out.some(x => x.toLowerCase() === n.toLowerCase())) continue;
+      out.push(n);
+    }
+    return out;
+  }
+
+  function countHits(text, words) {
+    const low = String(text || '').toLowerCase();
+    let n = 0;
+    for (const w of words || []) {
+      const k = String(w || '').toLowerCase();
+      if (k && low.includes(k)) n++;
+    }
+    return n;
   }
 
   function jobDirectionBlob(job) {
@@ -217,21 +497,128 @@ window.ResumeMatch = (() => {
     return [job.name || '', skills, tags, job.info || '', job.jdText || ''].join(' ');
   }
 
-  function detectJobDirection(job) {
+  // 在给定方向名里找最贴近的一项，判断不出返回 null
+  //
+  // 一条规则，没有行业特例：
+  //   标题命中权重更高，其余文本命中算一份，总分最高的方向胜出
+  //   平局 → 命中词在标题里更靠前（领域限定词优先）
+  //        → 命中词更长 → 方向名更长
+  //
+  // 关键词来自画像（AI 生成 / 用户手改），不含「测试」「工程师」这类泛词，
+  // 所以「座舱自动化测试工程师」不会被「自动化测试」抢走。
+  // 一个词都没命中 = 认不出，不猜也不误杀。
+  function detectJobDirection(job, names, profile) {
     const text = jobDirectionBlob(job);
-    if (!text.trim()) return '';
-    if (HARDWARE_RE.test(text)) return '硬件';
-    if (AI_TEST_RE.test(text)) return 'AI测试';
-    if (SOFTWARE_RE.test(text)) return '软件';
-    return '';
+    const title = String(job.name || '');
+    const list = [].concat(names || []);
+    if (!text.trim() || !list.length) return null;
+
+    let best = null;
+    let bestRank = null;
+    for (const name of list) {
+      if (isGenericDirectionName(name, profile)) continue;
+      const words = directionKeywordsOf(name, profile);
+      const hits = countHits(text, words);
+      if (!hits) continue;
+      const rank = [
+        countHits(title, words),                       // 标题命中权重更高
+        hits,
+        -firstHitIndex(title || text, words),           // 靠前 = 领域限定词
+        longestHit(text, words),
+        String(name).length,
+      ];
+      if (!bestRank || compareRank(rank, bestRank) > 0) {
+        bestRank = rank;
+        best = { name, hits, strong: longestHit(text, words) };
+      }
+    }
+    return best;
   }
 
-  function directionMismatch(job, profile) {
-    const want = normalizeDirections(profile && profile.directions);
-    if (!want.length) return false;
-    const got = detectJobDirection(job);
-    if (!got) return false;
-    return want.indexOf(got) < 0;
+  // 按分量依次比较，返回 >0 表示 a 更优
+  function compareRank(a, b) {
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return 0;
+  }
+
+  // 供侧边栏渲染：按候选顺序返回已勾选的方向
+  function selectedDirectionsOf(profile) {
+    const opts = directionOptionsOf(profile);
+    const sel = directionSelection(profile, opts);
+    return opts.filter(n => sel.picked.has(n));
+  }
+
+  // 方向关键词备好了吗：老画像 / 刚手加还没填词的方向都算「没备好」。
+  // 没备好时识别力只剩字面匹配，绝大多数岗位会落到「认不出 → 放行」，
+  // 看起来就像筛选没生效，必须在日志和 UI 里说清楚。
+  function directionCoverageOf(profile) {
+    const opts = directionOptionsOf(profile);
+    const sel = directionSelection(profile, opts);
+    const picked = opts.filter(n => sel.picked.has(n));
+    const kw = (profile && profile.directionKeywords) || {};
+    const other = (profile && profile.otherDirections) || {};
+    const ready = picked.filter(n => (Array.isArray(kw[n]) && kw[n].length) || (Array.isArray(other[n]) && other[n].length));
+    return {
+      picked,
+      total: picked.length,
+      ready: ready.length,
+      missing: picked.length - ready.length,
+      hasNeighbors: Object.keys(other).length,
+      // 一个方向都没有专属词 = 完全靠字面匹配
+      blind: picked.length > 0 && ready.length === 0,
+    };
+  }
+
+  // 匹配日志里回显本次生效的方向，勾选没落库时一眼能看出来
+  function directionLogText(profile) {
+    const opts = directionOptionsOf(profile);
+    const sel = directionSelection(profile, opts);
+    if (sel.unlimited) return '方向 不限（不做方向排除）';
+    const cov = directionCoverageOf(profile);
+    const head = '方向 ' + cov.total + ' 个: ' + cov.picked.join('/') + '（其余方向一律排除）';
+    if (cov.blind) {
+      return head + ' · 但这些方向都没有关键词，只能按名字字面匹配，'
+        + '认不出的岗位会全部放行。请点「解析」重新生成关键词';
+    }
+    if (cov.missing) {
+      return head + ' · 其中 ' + cov.missing + ' 个方向还没设关键词（只能字面匹配），'
+        + '可以在方向右侧的「词」里补上';
+    }
+    return head;
+  }
+
+  // 方向识别池：所有候选方向（勾选的 + 没勾的都会参与识别）
+  // 没勾的方向也必须能认出来，才能判成「不符」排除掉；否则它会被同族方向吸走放行。
+  function directionPoolOf(profile, opts) {
+    const hidden = Object.keys((profile && profile.otherDirections) || {});
+    return uniq([].concat(opts || [], hidden));
+  }
+
+  // 一次算清方向相关的全部结论，避免同一岗位重复识别三遍
+  // 返回 { score, blocked, got, reason }
+  //   reason: 'unlimited' | 'notext' | 'weak' | 'hit' | 'miss'
+  //
+  // 方向只做「拦 / 不拦」，不参与打分：不拦就是 100，拦下来直接 veto。
+  // 认不出方向的一律放行，不猜也不误杀。
+  function directionInfo(job, profile) {
+    const opts = directionOptionsOf(profile);
+    const sel = directionSelection(profile, opts);
+    if (sel.unlimited) return { score: 100, blocked: false, got: null, reason: 'unlimited' };
+    if (!jobDirectionBlob(job).trim()) return { score: 100, blocked: false, got: null, reason: 'notext' };
+    const got = detectJobDirection(job, directionPoolOf(profile, opts), profile);
+    if (!got) return { score: 100, blocked: false, got: null, reason: 'weak' };
+    if (sel.picked.has(got.name)) return { score: 100, blocked: false, got: got.name, reason: 'hit' };
+    return { score: 40, blocked: true, got: got.name, reason: 'miss' };
+  }
+
+  // 精排拿到 JD 后的方向复核：先只按岗位名/技能/标签判定，
+  // 认不出来才带上 JD —— 否则 JD 里顺口提一句「车载」就把软件测试岗误杀了。
+  function directionInfoForRefine(job, profile) {
+    const head = directionInfo(Object.assign({}, job, { jdText: '' }), profile);
+    if (head.reason !== 'weak') return head;
+    return directionInfo(job, profile);
   }
 
   function salaryMinK(v) {
@@ -245,24 +632,41 @@ window.ResumeMatch = (() => {
     const s = String(raw || '').replace(/,/g, '').replace(/\s/g, '');
     if (!s || /面议|不限|保密|negotiable/i.test(s)) return null;
     const yearly = /年薪|\/年/.test(s) && !/\/月|月薪/.test(s);
-    const unitWan = /万/.test(s);
-    const unitQian = /千/.test(s);
-    const unitK = /[kK]/.test(s);
-    const nums = [];
-    const re = /(\d+(?:\.\d+)?)/g;
+    // 逐个数字带自己的单位，「6千-1.2万」才不会把 6 也当成万
+    const re = /(\d+(?:\.\d+)?)(万|千|[kK])?/g;
+    const items = [];
     let m;
-    while ((m = re.exec(s))) nums.push(parseFloat(m[1]));
-    if (!nums.length) return null;
-    let lo = nums[0];
-    let hi = nums.length > 1 ? nums[1] : nums[0];
-    if (nums.length >= 3 && nums[2] >= 12 && nums[2] <= 16) hi = nums[1];
-    const toK = (n) => {
-      if (unitWan) return yearly ? (n * 10) / 12 : n * 10;
-      if (unitQian || unitK) return yearly ? n / 12 : n;
+    while ((m = re.exec(s))) items.push({ v: parseFloat(m[1]), unit: m[2] || '' });
+    if (!items.length) return null;
+    let lo = items[0];
+    let hi = items.length > 1 ? items[1] : items[0];
+    // 6-12K·13薪：第三个数字是发薪月数，不是薪资上限
+    if (items.length >= 3) {
+      const third = items[2];
+      if (!third.unit && third.v >= 12 && third.v <= 16) hi = items[1];
+    }
+    // 只有一个显式单位时，没写单位的数字沿用它（「6-12万/年」的 6 也是万）
+    const explicit = new Set(items.map(x => x.unit).filter(Boolean));
+    const sole = explicit.size === 1 ? Array.from(explicit)[0] : '';
+    const unitOf = (it) => it.unit || ((sole && it.v < 1000) ? sole : '');
+    const toK = (it) => {
+      const n = it.v;
+      const unit = unitOf(it);
+      if (unit === '万') return yearly ? (n * 10) / 12 : n * 10;
+      if (unit === '千' || unit === 'k' || unit === 'K') return yearly ? n / 12 : n;
       if (n >= 1000) return yearly ? n / 12 / 1000 : n / 1000;
       return yearly ? n / 12 : n;
     };
-    return { min: toK(lo), max: toK(hi) };
+    let a = toK(lo);
+    let b = toK(hi);
+    if (a > b) { const t = a; a = b; b = t; }
+    // 日薪/时薪折算成月薪，否则「100-150元/天」会被当成 100-150K 放行
+    if (/元?\s*\/\s*(天|日)|每天|日薪/.test(s)) {
+      a = (a * 21.75) / 1000; b = (b * 21.75) / 1000;
+    } else if (/元?\s*\/\s*(小时|时)|每小时|时薪/.test(s)) {
+      a = (a * 8 * 21.75) / 1000; b = (b * 8 * 21.75) / 1000;
+    }
+    return { min: Math.round(a * 100) / 100, max: Math.round(b * 100) / 100 };
   }
 
   function jobSalaryText(job) {
@@ -428,14 +832,17 @@ window.ResumeMatch = (() => {
     if (r.name && !job.name) job.name = r.name;
     if (r.cityName && !job.cityName) job.cityName = r.cityName;
     const hasJd = !!(job.jdText && job.jdText.length >= 40);
+    const dinfo = directionInfoForRefine(job, profile);
     const block = extraWhy(job) || (isDispatch(job) ? 'dispatch' : '')
       || (isBlockedOutsourceCompany(job) ? 'outsource' : '')
       || (salaryTooLow(job, profile) ? 'salary' : '')
       || (scaleTooSmall(job, profile) ? 'scale' : '')
       || (degreeMismatch(job, profile) ? 'degree' : '')
-      || (directionMismatch(job, profile) ? 'direction' : '');
+      // 精排拿到 JD 后方向判定更准，这里必须二次校验
+      || (dinfo.blocked ? 'direction' : '');
     if (block) {
-      log('精排淘汰(' + whyLabel(block) + ') ' + job.name + (job.company ? ' | ' + job.company : ''));
+      log('精排淘汰(' + whyLabel(block) + ') ' + job.name + (job.company ? ' | ' + job.company : '')
+        + (block === 'direction' && dinfo.got ? ' → 判成「' + dinfo.got + '」，没勾它' : ''));
       return false;
     }
     if (jdCityMismatch(profile, r.cityName || job.cityName)) {
@@ -451,7 +858,7 @@ window.ResumeMatch = (() => {
       return false;
     }
     log(tag + ' ' + job.name + ' ' + s.score + '(职位' + s.title + '/技能' + s.skill + '/工作' + s.work
-      + (hasJd ? '/有JD' : '/无JD') + ')');
+      + (s.dir < 100 ? '/方向' + s.dir : '') + (hasJd ? '/有JD' : '/无JD') + ')');
     return true;
   }
 
@@ -461,6 +868,43 @@ window.ResumeMatch = (() => {
       if (counts[k]) parts.push(whyLabel(k) + ' ' + counts[k]);
     }
     if (parts.length) log('已排除 ' + parts.join('、') + ' 条');
+  }
+
+  // 「方向不符明细」里用到的方向名清单，给 0 条时的提示复用
+  function dirNamesText(dirStats) {
+    if (!dirStats) return '';
+    const rows = Object.keys(dirStats)
+      .map(k => ({ name: k, ...dirStats[k] }))
+      .filter(r => r.count > 0)
+      .sort((a, b) => b.count - a.count);
+    if (!rows.length) return '';
+    const names = rows.slice(0, 6).map(r => '「' + r.name + '」');
+    return '（' + names.join('、') + (rows.length > 6 ? ' 等' : '') + '）';
+  }
+
+  // 方向排除明细：把「被判成哪个方向 + 几个岗位 + 岗位名样例」列出来，
+  // 用户照着这里的名字补勾就能放行
+  function logDirectionDetail(log, dirStats) {
+    if (!dirStats) return;
+    const rows = Object.keys(dirStats)
+      .map(k => ({ name: k, ...dirStats[k] }))
+      .filter(r => r.count > 0)
+      .sort((a, b) => b.count - a.count);
+    if (!rows.length) return;
+    const parts = rows.slice(0, 6).map(r => {
+      const eg = (r.samples || []).slice(0, 3).join('、');
+      return '「' + r.name + '」' + r.count + ' 条' + (eg ? '（' + eg + '）' : '');
+    });
+    if (rows.length > 6) parts.push('等 ' + rows.length + ' 个方向');
+    log('方向不符明细: ' + parts.join('；'));
+    log('补勾上面这些方向名就能放行（下拉里没有，就在下方输入框添加）；想全部不筛，勾回「全部（不限方向）」。');
+  }
+
+  // 0 条时的方向兜底提示，三端共用
+  function directionTipText(dirStats, total) {
+    return '被方向筛掉 ' + total + ' 条' + dirNamesText(dirStats)
+      + '：当前只匹配勾选的方向。补勾上面这些方向名就能放行'
+      + '（下拉里没有，就在下方输入框添加），或勾回「全部（不限方向）」。';
   }
 
   function overlapScore(needles, haystack) {
@@ -517,21 +961,27 @@ window.ResumeMatch = (() => {
   }
 
   function scoreList(job, profile) {
+    // 方向先算一次：粗筛阶段的排除明细要把「被判成哪个方向」显示出来
+    const dinfo = directionInfo(job, profile);
     const extra = extraWhy(job) || (isDispatch(job) ? 'dispatch' : '')
       || (isBlockedOutsourceCompany(job) ? 'outsource' : '')
       || (salaryTooLow(job, profile) ? 'salary' : '')
       || (scaleTooSmall(job, profile) ? 'scale' : '')
       || (degreeMismatch(job, profile) ? 'degree' : '')
-      || (directionMismatch(job, profile) ? 'direction' : '');
-    if (extra) return { score: 0, veto: true, title: 0, skill: 0, work: 0, why: extra };
-    if (isVeto(profile, job.name)) return { score: 0, veto: true, title: 0, skill: 0, work: 0 };
-    if (cityMismatch(profile, job)) return { score: 0, veto: true, title: 0, skill: 0, work: 0 };
+      || (dinfo.blocked ? 'direction' : '');
+    if (extra) {
+      return { score: 0, veto: true, title: 0, skill: 0, work: 0, dir: 100, why: extra, dirName: dinfo.got };
+    }
+    if (isVeto(profile, job.name)) return { score: 0, veto: true, title: 0, skill: 0, work: 0, dir: 100 };
+    if (cityMismatch(profile, job)) return { score: 0, veto: true, title: 0, skill: 0, work: 0, dir: 100 };
     const hay = jobHaystack(job);
     const title = titleScore(profile.titles, job.name);
     const skill = overlapHits(profile.skills, hay, 3);
     const work = overlapHits(profile.workKeywords, hay, 2);
-    const score = Math.round(title * 0.50 + skill * 0.20 + work * 0.30);
-    return { score, veto: false, title, skill, work };
+    const dir = dinfo.score;
+    const base = Math.round(title * 0.50 + skill * 0.20 + work * 0.30);
+    const score = dir >= 100 ? base : Math.round(base * (0.85 + (0.15 * dir) / 100));
+    return { score, veto: false, title, skill, work, dir };
   }
 
   function scoreJd(job, profile) {
@@ -539,8 +989,10 @@ window.ResumeMatch = (() => {
     const title = titleScore(profile.titles, job.name);
     const skill = overlapHits(profile.skills, hay, 3);
     const work = overlapHits(profile.workKeywords, hay, 3);
-    const score = Math.round(title * 0.40 + skill * 0.20 + work * 0.40);
-    return { score, title, skill, work };
+    const dir = directionInfoForRefine(job, profile).score;
+    const base = Math.round(title * 0.40 + skill * 0.20 + work * 0.40);
+    const score = dir >= 100 ? base : Math.round(base * (0.85 + (0.15 * dir) / 100));
+    return { score, title, skill, work, dir };
   }
 
   function jdCityMismatch(profile, cityName) {
@@ -896,8 +1348,11 @@ window.ResumeMatch = (() => {
     const filters = (opts && opts.filters) || {};
     const mapped = [];
     const seen = new Set();
+    let blockCode = 0;
+    lastSearchBlock = null;
     let usedPages = 0;
-    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+    let maxPages = SEARCH_PAGES_MAX;
+    for (let page = 1; page <= maxPages; page++) {
       const res = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -906,6 +1361,7 @@ window.ResumeMatch = (() => {
           const diag = [];
           let stop = false;
           let stopMsg = '';
+          let blockCode = 0;
           const qs = new URLSearchParams();
           qs.set('page', String(params.page));
           qs.set('pageSize', '15');
@@ -936,6 +1392,7 @@ window.ResumeMatch = (() => {
                   stopMsg = msg;
                   break;
                 }
+                if (!jobs.length) blockCode = blockCode || json.code;
                 continue;
               }
               for (const j of jl) jobs.push(j);
@@ -944,7 +1401,7 @@ window.ResumeMatch = (() => {
               diag.push('err=' + e.message);
             }
           }
-          return { jobs, diag, stop, stopMsg };
+          return { jobs, diag, stop, stopMsg, blockCode };
         },
         args: [{
           page,
@@ -957,6 +1414,7 @@ window.ResumeMatch = (() => {
       const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
       if (raw.diag && raw.diag.length) log('期望推荐: ' + raw.diag.join(' | '));
       if (raw.stop) throw new Error('搜索触发风控，已停止。' + (raw.stopMsg || ''));
+      if (raw.blockCode) blockCode = raw.blockCode;
       let added = 0;
       for (const j of raw.jobs || []) {
         const job = mapApiJob(j);
@@ -967,10 +1425,19 @@ window.ResumeMatch = (() => {
       }
       usedPages = page;
       const fresh = mapped.filter((j) => !appliedLocal.has(String(j.encryptId || ''))).length;
+      // 整页被限流（一个岗位都没拿到）：再翻页也只会继续 code=37，交给上层刷页面
+      if (raw.blockCode && !mapped.length) break;
       if (page >= SEARCH_PAGES && fresh >= SEARCH_FRESH_TARGET) break;
+      // 没有新增说明池子翻到底了
       if (!added && page >= SEARCH_PAGES) break;
+      // 前几页新岗位不够（多半是已投太多），自动加深到更深页数
+      if (page >= SEARCH_PAGES && fresh < SEARCH_FRESH_TARGET && maxPages < SEARCH_PAGES_DEEP) {
+        maxPages = SEARCH_PAGES_DEEP;
+        log('未投岗位只有 ' + fresh + ' 条，加深翻页到 ' + maxPages + ' 页');
+      }
     }
     log('BOSS 搜索共 ' + mapped.length + ' 条（求职期望，' + usedPages + ' 页，目标未投≥' + SEARCH_FRESH_TARGET + '）');
+    if (!mapped.length && blockCode) lastSearchBlock = { code: blockCode };
     return mapped;
   }
 
@@ -984,10 +1451,14 @@ window.ResumeMatch = (() => {
       : profile.titles.slice(0, 3);
     const city = (opts && opts.city) || profile.cityCode || profile.city || '';
     const filters = (opts && opts.filters) || {};
+    const noDeep = !!(opts && opts.noDeep);
     const mapped = [];
     const seen = new Set();
     let usedPages = 0;
-    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+    let blockCode = 0;
+    lastSearchBlock = null;
+    let maxPages = (opts && opts.maxPages) || SEARCH_PAGES_MAX;
+    for (let page = 1; page <= maxPages; page++) {
       const res = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -996,6 +1467,7 @@ window.ResumeMatch = (() => {
           const diag = [];
           let stop = false;
           let stopMsg = '';
+          let blockCode = 0;
           const filterKeys = params.filterKeys || [];
           for (const query of params.queries) {
             const qs = new URLSearchParams();
@@ -1026,13 +1498,14 @@ window.ResumeMatch = (() => {
                   stopMsg = msg;
                   break;
                 }
+                if (!jobs.length) blockCode = blockCode || json.code;
               }
               for (const j of jl) jobs.push(j);
             } catch (e) {
               diag.push(query + ' p' + params.page + ' err=' + e.message);
             }
           }
-          return { jobs, diag, stop, stopMsg };
+          return { jobs, diag, stop, stopMsg, blockCode };
         },
         args: [{
           queries,
@@ -1046,6 +1519,7 @@ window.ResumeMatch = (() => {
       const raw = (res && res[0] && res[0].result) || { jobs: [], diag: [] };
       if (raw.diag && raw.diag.length) log('搜索: ' + raw.diag.join(' | '));
       if (raw.stop) throw new Error('搜索触发风控，已停止。' + (raw.stopMsg || ''));
+      if (raw.blockCode) blockCode = raw.blockCode;
       let added = 0;
       for (const j of raw.jobs || []) {
         const job = mapApiJob(j);
@@ -1056,11 +1530,20 @@ window.ResumeMatch = (() => {
       }
       usedPages = page;
       const fresh = mapped.filter((j) => !appliedLocal.has(String(j.encryptId || ''))).length;
+      // 整页被限流（一个岗位都没拿到）：再翻页也只会继续 code=37，交给上层刷页面
+      if (raw.blockCode && !mapped.length) break;
       if (page >= SEARCH_PAGES && fresh >= SEARCH_FRESH_TARGET) break;
+      // 没有新增说明池子翻到底了
       if (!added && page >= SEARCH_PAGES) break;
+      // 前几页新岗位不够（多半是已投太多），自动加深到更深页数
+      if (!noDeep && page >= SEARCH_PAGES && fresh < SEARCH_FRESH_TARGET && maxPages < SEARCH_PAGES_DEEP) {
+        maxPages = SEARCH_PAGES_DEEP;
+        log('未投岗位只有 ' + fresh + ' 条，加深翻页到 ' + maxPages + ' 页');
+      }
     }
-    const mode = (opts && opts.usePageFilters) ? '页面筛选' : '画像接口';
+    const mode = (opts && opts.mode) || ((opts && opts.usePageFilters) ? '页面筛选' : '画像接口');
     log('BOSS 搜索共 ' + mapped.length + ' 条（' + mode + '，' + usedPages + ' 页，目标未投≥' + SEARCH_FRESH_TARGET + '）');
+    if (!mapped.length && blockCode) lastSearchBlock = { code: blockCode };
     return mapped;
   }
 
@@ -1098,6 +1581,18 @@ window.ResumeMatch = (() => {
         usePageFilters: true,
       });
     }
+    // 搜索页只有关键词、没点下拉筛选：沿用页面关键词，别退回画像职位
+    if (pageCtx.query && !pageCtx.onRecommend && !pageCtx.encryptExpectId) {
+      log('沿用页面关键词拉列表: ' + pageCtx.query
+        + (pageCtx.city ? ' · 城市 ' + pageCtx.city : ''));
+      return searchJobsByApi(tabId, profile, log, {
+        queries: [pageCtx.query],
+        city: pageCtx.city || profile.cityCode || profile.city || '',
+        filters: pageCtx.params,
+        usePageFilters: false,
+        mode: '页面关键词',
+      });
+    }
     log('未识别到求职期望/筛选，按画像职位走接口搜索');
     return searchJobsByApi(tabId, profile, log, {
       queries: profile.titles.slice(0, 3),
@@ -1105,6 +1600,55 @@ window.ResumeMatch = (() => {
       filters: {},
       usePageFilters: false,
     });
+  }
+
+  // 任何一次 BOSS 接口搜索：0 条且带错误码 → 刷新页面重试一次。
+  // 同一次点击里最多刷一次：已经刷过还是 code=37 就是账号级频率限制，再刷也没用。
+  // 备用关键词这类「额外多搜一轮」也走这里，搜完同样要更新页面标记，
+  // 否则下一次点击会拿旧标记去比新文档，白跑一轮才触发补救刷新。
+  async function searchWithReload(tabId, log, fn) {
+    try {
+      return await searchWithReloadOnce(tabId, log, fn, true);
+    } finally {
+      await markUsedStamp(tabId);
+    }
+  }
+
+  async function searchWithReloadOnce(tabId, log, fn, allowReload) {
+    let list = await fn();
+    if (!list.length && lastSearchBlock && allowReload) {
+      const code = lastSearchBlock.code;
+      lastSearchBlock = null;
+      const stamp = await reloadBossTab(tabId, log, '搜索被限流(code=' + code + ')');
+      list = await fn();
+      if (stamp) await markUsedStamp(tabId);
+      if (!list.length && lastSearchBlock) {
+        lastSearchBlock = { code: lastSearchBlock.code, hard: true };
+        log('刷新后仍是 code=' + lastSearchBlock.code + '，这是账号级频率限制，等一分钟再点。');
+      }
+    }
+    return list;
+  }
+
+  // 同一个页面文档里连搜第二轮一定被限流：第一轮吃的是页面刚加载时发的令牌，
+  // 第二轮 joblist 全部回 code=37、n=0，手动刷新页面才好——所以这里自动刷。
+  // 先按页面标记预判（timeOrigin 相同 = 这个文档已经搜过）；
+  // 预判刷过之后不再补刷，避免一次点击刷两遍。
+  async function searchJobsWithReload(tabId, profile, log) {
+    let reloaded = false;
+    const before = await bossPageStamp(tabId);
+    if (before) {
+      const used = await readUsedStamp(tabId);
+      if (used && used.t === before.t && used.href === before.href) {
+        reloaded = !!(await reloadBossTab(tabId, log, '这个页面已经搜过一轮，BOSS 接口会限流(code=37)'));
+      }
+    }
+    try {
+      return await searchWithReloadOnce(tabId, log, () => searchJobs(tabId, profile, log), !reloaded);
+    } finally {
+      // 标记「这个页面已经搜过」，下次点会自动先刷新
+      await markUsedStamp(tabId);
+    }
   }
 
   async function refineJobs(tabId, jobs, profile, log) {
@@ -1180,6 +1724,65 @@ window.ResumeMatch = (() => {
     return { jobs: refined, stopped };
   }
 
+  // 列表粗筛：打分 + 阈值过滤，返回通过的岗位和排除原因统计
+  // 记一条方向排除明细：方向名 → { count, samples }，样例最多留 3 个岗位名
+  function bumpDirStat(stats, dirName, jobName) {
+    if (!dirName) return;
+    const key = String(dirName);
+    const cur = stats[key] || (stats[key] = { count: 0, samples: [] });
+    cur.count++;
+    const nm = String(jobName || '').trim();
+    if (nm && cur.samples.length < 3 && cur.samples.indexOf(nm) < 0) cur.samples.push(nm);
+  }
+
+  function coarseFilter(listed, profile, log) {
+    const passed = [];
+    const samples = [];
+    const excludeCounts = {};
+    const dirStats = {};
+    for (const job of listed) {
+      const s = scoreList(job, profile);
+      job.score = s.score;
+      job.scoreDetail = s;
+      bumpWhy(excludeCounts, s.why);
+      if (s.why === 'direction') bumpDirStat(dirStats, s.dirName, job.name);
+      if (samples.length < 5) {
+        samples.push((job.name || '(无标题)') + ' ' + s.score
+          + '(职位' + s.title + '/技能' + s.skill + '/工作' + s.work
+          + (s.why === 'direction' && s.dirName ? '/方向:' + s.dirName : '')
+          + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')) + ')');
+      }
+      if (!s.veto && s.score >= LIST_THRESHOLD) passed.push(job);
+    }
+    passed.sort((a, b) => b.score - a.score);
+    if (samples.length) log('粗筛样例: ' + samples.join(' | '));
+    logExcludes(log, excludeCounts);
+    logDirectionDetail(log, dirStats);
+    return { passed, excludeCounts, dirStats };
+  }
+
+  // 粗筛为 0 时的备用关键词：画像里还没用过的职位名 + 少量技能组合
+  function fallbackQueries(profile, used) {
+    const have = new Set([].concat(used || []).map(s => String(s || '').toLowerCase()));
+    const out = [];
+    const push = (q) => {
+      const n = String(q || '').trim();
+      if (!n || n.length > 20) return;
+      const low = n.toLowerCase();
+      if (have.has(low)) return;
+      have.add(low);
+      out.push(n);
+    };
+    for (const t of profile.titles || []) push(t);
+    // 职位名补上「工程师」，能搜到另一批岗位；已经以它结尾的不重复加
+    for (const t of (profile.titles || []).slice(0, 2)) {
+      if (!/工程师$/.test(t)) push(t + '工程师');
+      push('资深' + t);
+    }
+    for (const s of (profile.skills || []).slice(0, 2)) push(s);
+    return out.slice(0, 8);
+  }
+
   async function run({ tabId, log }) {
     await loadOutsourceCompanies();
     const appliedN = await loadAppliedLocal('boss');
@@ -1188,33 +1791,79 @@ window.ResumeMatch = (() => {
     const profile = extractProfile(loaded.text);
     log('画像 职位=' + profile.titles.join('/') + ' 城市=' + (profile.city || '未识别')
       + ' 技能=' + profile.skills.slice(0, 8).join(',') + ' 工作词=' + profile.workKeywords.slice(0, 8).join(','));
+    log(directionLogText(profile));
     if ((outsourceNames || []).length) log('外包公司黑名单 ' + outsourceNames.length + ' 家');
     if (appliedN) log('本地已投去重 ' + appliedN + ' 条');
 
-    const listed = await searchJobs(tabId, profile, log);
+    const listed = await searchJobsWithReload(tabId, profile, log);
     log('搜索到 ' + listed.length + ' 条，开始列表粗筛');
 
-    const passed = [];
-    const samples = [];
-    const excludeCounts = {};
-    for (const job of listed) {
-      const s = scoreList(job, profile);
-      job.score = s.score;
-      job.scoreDetail = s;
-      bumpWhy(excludeCounts, s.why);
-      if (samples.length < 5) {
-        samples.push((job.name || '(无标题)') + ' ' + s.score
-          + '(职位' + s.title + '/技能' + s.skill + '/工作' + s.work
-          + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')) + ')');
+    let coarse = coarseFilter(listed, profile, log);
+    let passed = coarse.passed;
+
+    // 粗筛 0 条：多半是搜索池里的岗位都投过了，换关键词再搜一轮
+    const appliedBlocked = coarse.excludeCounts.applied || 0;
+    if (passed.length < FALLBACK_MIN && listed.length && appliedBlocked) {
+      log('被「已投/已沟通」挡掉 ' + appliedBlocked + ' 条，换关键词再搜一轮');
+      const queries = fallbackQueries(profile, profile.titles.slice(0, 3)).slice(0, 3);
+      if (queries.length) {
+        log('备用关键词: ' + queries.join('/'));
+        try {
+          const more = await searchWithReload(tabId, log, () => searchJobsByApi(tabId, profile, log, {
+            queries,
+            city: profile.cityCode || profile.city || '',
+            filters: {},
+            usePageFilters: false,
+            maxPages: SEARCH_PAGES,
+            noDeep: true,
+          }));
+          const seen = new Set(listed.map(j => String(j.encryptId || '')).filter(Boolean));
+          const extra = more.filter(j => j.encryptId && !seen.has(String(j.encryptId)));
+          if (extra.length) {
+            log('备用关键词新增 ' + extra.length + ' 条，重新粗筛');
+            const again = coarseFilter(extra, profile, log);
+            passed = again.passed;
+            // 合并两轮的排除原因，最后的提示才不会漏掉已投数量
+            for (const k of Object.keys(again.excludeCounts)) {
+              coarse.excludeCounts[k] = (coarse.excludeCounts[k] || 0) + again.excludeCounts[k];
+            }
+            for (const k of Object.keys(again.dirStats || {})) {
+              const tar = coarse.dirStats[k] || (coarse.dirStats[k] = { count: 0, samples: [] });
+              const src = again.dirStats[k];
+              tar.count += src.count;
+              for (const nm of src.samples) {
+                if (tar.samples.length < 3 && tar.samples.indexOf(nm) < 0) tar.samples.push(nm);
+              }
+            }
+          } else {
+            log('备用关键词没有搜到新岗位');
+          }
+        } catch (e) {
+          log('备用关键词搜索失败: ' + (e.message || e));
+        }
       }
-      if (!s.veto && s.score >= LIST_THRESHOLD) passed.push(job);
     }
-    passed.sort((a, b) => b.score - a.score);
-    if (samples.length) log('粗筛样例: ' + samples.join(' | '));
-    logExcludes(log, excludeCounts);
+
+    const listCount = passed.length;
     log('粗筛留下 ' + passed.length + ' 条（阈值 ' + LIST_THRESHOLD + '），对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条并发精排（' + REFINE_CONCURRENCY + ' 路）');
 
-    if (!passed.length) return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
+    if (!passed.length) {
+      if (!listed.length) {
+        if (lastSearchBlock) {
+          log('BOSS 接口返回 code=' + lastSearchBlock.code + '（限流），刷新页面也没解开。'
+            + '这是账号级频率限制，等一分钟再点，或先手动翻一下职位页。');
+        } else {
+          log('搜索接口返回 0 条：可能页面未登录、触发了风控，或该城市当前没有匹配岗位。换城市/职位词后重试。');
+        }
+      } else if (coarse.excludeCounts.applied) {
+        log('本次搜索到的岗位都在本机已投名单里。可点「清空」重置去重，或换城市/职位词后重试。');
+      } else if (coarse.excludeCounts.direction) {
+        log(directionTipText(coarse.dirStats, coarse.excludeCounts.direction));
+      } else {
+        log('本次搜索到的岗位都被排除规则挡掉了，看上面的「已排除」明细。');
+      }
+      return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
+    }
 
     const refineTop = passed.slice(0, REFINE_MAX);
     const refined = await refineJobs(tabId, refineTop, profile, log);
@@ -1226,7 +1875,7 @@ window.ResumeMatch = (() => {
       jobs = refineTop;
     }
     return {
-      jobs, profile, stopped: refined.stopped, fallback, listCount: passed.length,
+      jobs, profile, stopped: refined.stopped, fallback, listCount,
       refineTotal: refineTop.length, refinePassed: fallback ? 0 : jobs.length,
     };
   }
@@ -1376,10 +2025,12 @@ window.ResumeMatch = (() => {
       : profile.titles.slice(0, 4);
     const cityId = (opts && opts.cityId) || ZHAOPIN_CITY[profile.city] || '';
     const mode = (opts && opts.mode) || '画像接口';
+    const noDeep = !!(opts && opts.noDeep);
     const mappedAll = [];
     const seen = new Set();
     let usedPages = 0;
-    for (let page = 1; page <= SEARCH_PAGES_MAX; page++) {
+    let maxPages = SEARCH_PAGES_MAX;
+    for (let page = 1; page <= maxPages; page++) {
       const res = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -1459,6 +2110,10 @@ window.ResumeMatch = (() => {
       const fresh = mappedAll.filter((j) => !appliedLocal.has(String(j.jobId || ''))).length;
       if (page >= SEARCH_PAGES && fresh >= SEARCH_FRESH_TARGET) break;
       if (!added && page >= SEARCH_PAGES) break;
+      if (!noDeep && page >= SEARCH_PAGES && fresh < SEARCH_FRESH_TARGET && maxPages < SEARCH_PAGES_DEEP) {
+        maxPages = SEARCH_PAGES_DEEP;
+        log('未投岗位只有 ' + fresh + ' 条，加深翻页到 ' + maxPages + ' 页');
+      }
     }
     if (mappedAll.length) {
       log('智联搜索共 ' + mappedAll.length + ' 条（' + mode + '，' + usedPages + ' 页，目标未投≥' + SEARCH_FRESH_TARGET + '）');
@@ -1639,6 +2294,33 @@ window.ResumeMatch = (() => {
     return { jobs: refined, stopped };
   }
 
+  // 智联列表粗筛（含公司名，方便对照）
+  function coarseFilterZp(listed, profile, log) {
+    const passed = [];
+    const samples = [];
+    const excludeCounts = {};
+    const dirStats = {};
+    for (const job of listed) {
+      const s = scoreList(job, profile);
+      job.score = s.score;
+      job.scoreDetail = s;
+      bumpWhy(excludeCounts, s.why);
+      if (s.why === 'direction') bumpDirStat(dirStats, s.dirName, job.name);
+      if (samples.length < 5) {
+        samples.push((job.name || '(无标题)') + ' ' + s.score
+          + (job.company ? '|' + job.company : '')
+          + (s.why === 'direction' && s.dirName ? '/方向:' + s.dirName : '')
+          + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')));
+      }
+      if (!s.veto && s.score >= LIST_THRESHOLD) passed.push(job);
+    }
+    passed.sort((a, b) => b.score - a.score);
+    if (samples.length) log('粗筛样例: ' + samples.join(' | '));
+    logExcludes(log, excludeCounts);
+    logDirectionDetail(log, dirStats);
+    return { passed, excludeCounts, dirStats };
+  }
+
   async function runZhaopin({ tabId, log }) {
     await loadOutsourceCompanies();
     const appliedN = await loadAppliedLocal('zp');
@@ -1647,6 +2329,7 @@ window.ResumeMatch = (() => {
     const profile = extractProfile(loaded.text);
     log('画像 职位=' + profile.titles.join('/') + ' 城市=' + (profile.city || '未识别')
       + ' 技能=' + profile.skills.slice(0, 8).join(',') + ' 工作词=' + profile.workKeywords.slice(0, 8).join(','));
+    log(directionLogText(profile));
     if ((outsourceNames || []).length) log('外包公司黑名单 ' + outsourceNames.length + ' 家');
     if (appliedN) log('本地已投去重 ' + appliedN + ' 条');
 
@@ -1657,27 +2340,59 @@ window.ResumeMatch = (() => {
     }
     log('智联搜索到 ' + listed.length + ' 条，开始粗筛');
 
-    const passed = [];
-    const samples = [];
-    const excludeCounts = {};
-    for (const job of listed) {
-      const s = scoreList(job, profile);
-      job.score = s.score;
-      job.scoreDetail = s;
-      bumpWhy(excludeCounts, s.why);
-      if (samples.length < 5) {
-        samples.push((job.name || '(无标题)') + ' ' + s.score
-          + (job.company ? '|' + job.company : '')
-          + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')));
+    let coarse = coarseFilterZp(listed, profile, log);
+    let passed = coarse.passed;
+
+    // 粗筛 0 条且被「已投」挡掉：换关键词再搜一轮（同 BOSS）
+    const appliedBlocked = coarse.excludeCounts.applied || 0;
+    if (passed.length < FALLBACK_MIN && appliedBlocked) {
+      log('被「已投/已沟通」挡掉 ' + appliedBlocked + ' 条，换关键词再搜一轮');
+      const queries = fallbackQueries(profile, profile.titles.slice(0, 4)).slice(0, 3);
+      if (queries.length) {
+        log('备用关键词: ' + queries.join('/'));
+        try {
+          const more = await searchZhaopinByQueries(tabId, profile, log, {
+            queries,
+            cityId: ZHAOPIN_CITY[profile.city] || '',
+            mode: '备用关键词',
+            noDeep: true,
+          });
+          const seen = new Set(listed.map(j => String(j.jobId || '')).filter(Boolean));
+          const extra = more.filter(j => j.jobId && !seen.has(String(j.jobId)));
+          if (extra.length) {
+            log('备用关键词新增 ' + extra.length + ' 条，重新粗筛');
+            const again = coarseFilterZp(extra, profile, log);
+            passed = again.passed;
+            for (const k of Object.keys(again.excludeCounts)) {
+              coarse.excludeCounts[k] = (coarse.excludeCounts[k] || 0) + again.excludeCounts[k];
+            }
+            for (const k of Object.keys(again.dirStats || {})) {
+              const tar = coarse.dirStats[k] || (coarse.dirStats[k] = { count: 0, samples: [] });
+              const src = again.dirStats[k];
+              tar.count += src.count;
+              for (const nm of src.samples) {
+                if (tar.samples.length < 3 && tar.samples.indexOf(nm) < 0) tar.samples.push(nm);
+              }
+            }
+          } else {
+            log('备用关键词没有搜到新岗位');
+          }
+        } catch (e) {
+          log('备用关键词搜索失败: ' + (e.message || e));
+        }
       }
-      if (!s.veto && s.score >= LIST_THRESHOLD) passed.push(job);
     }
-    passed.sort((a, b) => b.score - a.score);
-    if (samples.length) log('粗筛样例: ' + samples.join(' | '));
-    logExcludes(log, excludeCounts);
+
+    const listCount = passed.length;
     log('粗筛留下 ' + passed.length + ' 条，对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条并发精排（' + REFINE_CONCURRENCY + ' 路后台标签）');
     if (!passed.length) {
-      log('智联匹配结果为 0 条。看样例：可能被校招/不可选中/派遣规则排除，或未过阈值 ' + LIST_THRESHOLD + '。');
+      if (coarse.excludeCounts.applied) {
+        log('本次搜到的岗位都在本机已投名单里。可点「清空」重置去重，或换城市/职位词后重试。');
+      } else if (coarse.excludeCounts.direction) {
+        log(directionTipText(coarse.dirStats, coarse.excludeCounts.direction));
+      } else {
+        log('智联匹配结果为 0 条。看样例：可能被校招/不可选中/派遣规则排除，或未过阈值 ' + LIST_THRESHOLD + '。');
+      }
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
     const refineTop = passed.slice(0, REFINE_MAX);
@@ -1690,7 +2405,7 @@ window.ResumeMatch = (() => {
       jobs = refineTop;
     }
     return {
-      jobs, profile, stopped: refined.stopped, fallback, listCount: passed.length,
+      jobs, profile, stopped: refined.stopped, fallback, listCount,
       refineTotal: refineTop.length, refinePassed: fallback ? 0 : jobs.length,
     };
   }
@@ -1981,6 +2696,7 @@ window.ResumeMatch = (() => {
     const passed = [];
     const samples = [];
     const excludeCounts = {};
+    const dirStats = {};
     let listedTotal = 0;
     const pageSeen = new Set();
 
@@ -2015,9 +2731,11 @@ window.ResumeMatch = (() => {
         job.score = s.score;
         job.scoreDetail = s;
         bumpWhy(excludeCounts, s.why);
+        if (s.why === 'direction') bumpDirStat(dirStats, s.dirName, job.name);
         if (samples.length < 5) {
           samples.push((job.name || '(无标题)') + ' ' + s.score
             + (job.company ? '|' + job.company : '')
+            + (s.why === 'direction' && s.dirName ? '/方向:' + s.dirName : '')
             + (s.why ? '/' + whyLabel(s.why) : (s.veto ? '/否决' : '')));
         }
         if (!s.veto && s.score >= LIST_THRESHOLD) {
@@ -2031,7 +2749,7 @@ window.ResumeMatch = (() => {
     }
 
     passed.sort((a, b) => b.score - a.score);
-    return { passed, samples, excludeCounts, listedTotal };
+    return { passed, samples, excludeCounts, dirStats, listedTotal };
   }
 
   async function loadW51SkipIds(tabUrl) {
@@ -2172,6 +2890,7 @@ window.ResumeMatch = (() => {
     const profile = extractProfile(loaded.text);
     log('画像 职位=' + profile.titles.join('/') + ' 城市=' + (profile.city || '未识别')
       + ' 技能=' + profile.skills.slice(0, 8).join(',') + ' 工作词=' + profile.workKeywords.slice(0, 8).join(','));
+    log(directionLogText(profile));
     if ((outsourceNames || []).length) log('外包公司黑名单 ' + outsourceNames.length + ' 家');
 
     await saveW51SearchCtx(profile);
@@ -2193,13 +2912,18 @@ window.ResumeMatch = (() => {
     const passed = collected.passed;
     if (collected.samples.length) log('粗筛样例: ' + collected.samples.join(' | '));
     logExcludes(log, collected.excludeCounts);
+    logDirectionDetail(log, collected.dirStats);
     if (!collected.listedTotal) {
       log('前 ' + SEARCH_PAGES_MAX + ' 页列表均为 0。请在前程搜索页手动搜索后看到职位再匹配。');
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
     log('粗筛留下 ' + passed.length + ' 条，对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条精排');
     if (!passed.length) {
-      log('前程匹配结果为 0 条。本页新岗已跳过或被规则排除，可手动翻页后再匹配。');
+      if (collected.excludeCounts.direction) {
+        log('前程匹配结果为 0 条：' + directionTipText(collected.dirStats, collected.excludeCounts.direction));
+      } else {
+        log('前程匹配结果为 0 条。本页新岗已跳过或被规则排除，可手动翻页后再匹配。');
+      }
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
     const refineTop = passed.slice(0, REFINE_MAX);
@@ -2219,5 +2943,5 @@ window.ResumeMatch = (() => {
     };
   }
 
-  return { loadResume, extractProfile, run, runZhaopin, run51job, LIST_THRESHOLD, REFINE_MAX, DEGREE_OPTS, DIRECTION_OPTS };
+  return { loadResume, extractProfile, run, runZhaopin, run51job, LIST_THRESHOLD, REFINE_MAX, DEGREE_OPTS, DIRECTION_MAX_OPTS, directionOptionsOf, selectedDirectionsOf, directionKeywordsOf, isGenericDirectionName };
 })();

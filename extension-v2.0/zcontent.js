@@ -28,7 +28,7 @@
     const handler = (e) => {
       if (e.data?.__zl && e.data.id === cmd.id) {
         window.removeEventListener('message', handler);
-        chrome.storage.local.set({ zresult: { id: e.data.id, ok: e.data.ok, msg: e.data.msg } });
+        chrome.storage.local.set({ zresult: { id: e.data.id, ok: e.data.ok, dup: !!e.data.dup, msg: e.data.msg } });
         div.remove();
         processing = false;
       }
@@ -42,6 +42,6 @@
         div.remove();
         processing = false;
       }
-    }, 15000);
+    }, 25000);
   });
 })();

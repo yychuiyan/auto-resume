@@ -4,15 +4,21 @@ let sessionLogs = [];
 let activeTab = 'boss';
 const LOG_LIMIT = 300;
 const progressLogCursor = { boss: 0, zp: 0, w51: 0 };
-const today = new Date().toISOString().substring(0, 10);
+
+// 用本地日期而不是 toISOString（UTC）：否则「今日」在北京时间早上 8 点就换天了
+function todayKey() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
 
 function dayCountKey(platform) {
-  return platform + '_cnt_' + today;
+  return platform + '_cnt_' + todayKey();
 }
 
 async function refreshDayCounts() {
   const keys = [dayCountKey('boss'), dayCountKey('zp'), dayCountKey('w51'),
-    'applied_ids_boss', 'applied_ids_zp', 'applied_ids_w51'];
+    'applied_ids_boss', 'applied_ids_zp', 'applied_ids_w51', 'w51_matched_ids'];
   const s = await chrome.storage.local.get(keys);
   const nums = {
     boss: s[keys[0]] || 0,
@@ -24,6 +30,11 @@ async function refreshDayCounts() {
     zp: Array.isArray(s.applied_ids_zp) ? s.applied_ids_zp.length : 0,
     w51: Array.isArray(s.applied_ids_w51) ? s.applied_ids_w51.length : 0,
   };
+  // 前程的跳过来源有两份（本机已投 + 匹配已跳过），取并集才是真实去重数
+  const w51Set = new Set([]
+    .concat(Array.isArray(s.applied_ids_w51) ? s.applied_ids_w51 : [])
+    .concat(Array.isArray(s.w51_matched_ids) ? s.w51_matched_ids : [])
+    .map(String));
   const set = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
   set('cntBoss', nums.boss);
   set('cntZp', nums.zp);
@@ -33,15 +44,19 @@ async function refreshDayCounts() {
   set('dayW51', nums.w51);
   set('appliedBoss', applied.boss);
   set('appliedZp', applied.zp);
-  set('appliedW51', applied.w51);
+  set('appliedW51', w51Set.size);
 }
 
 async function clearAppliedIds(platform) {
   const key = 'applied_ids_' + platform;
-  await chrome.storage.local.remove(key);
+  // 前程另外存了一份「匹配已跳过」，只清一半的话下一轮还是 0 条
+  const keys = platform === 'w51'
+    ? [key, 'w51_matched_ids', 'w51_matched_kw']
+    : [key];
+  await chrome.storage.local.remove(keys);
   await refreshDayCounts();
   const label = ({ boss: 'BOSS', zp: '智联', w51: '前程' })[platform] || platform;
-  info(label + ' 本机已投名单已清空');
+  info(label + (platform === 'w51' ? ' 本机已投与已匹配记录已清空' : ' 本机已投名单已清空'));
 }
 
 function escHtml(s) {
@@ -194,30 +209,236 @@ function bindDegreePicker() {
   document.addEventListener('click', () => wrap.classList.remove('open'));
 }
 
+let directionOptionsCache = [];
+// 方向名 → 关键词数组（AI 生成，用户可改）；筛选用它判断岗位属于哪个方向
+let directionKeywordsCache = {};
+// 同领域但不匹配的相邻方向（AI 给），只参与判定，不进下拉
+let otherDirectionsCache = {};
+// true = 不限方向（勾选「全部」），false = 只匹配勾选的方向
+let directionUnlimited = true;
+// 方向编辑器渲染过没有：没渲染过时缓存是空的，不能拿它回写覆盖已存画像
+let directionEditorReady = false;
+
+function directionWordsOf(name) {
+  const n = String(name || '');
+  const kw = directionKeywordsCache[n];
+  if (Array.isArray(kw) && kw.length) return kw.slice();
+  return [n];
+}
+
+function setDirectionWords(name, words) {
+  const n = String(name || '').trim();
+  if (!n) return;
+  const list = String(words || '')
+    .split(/[,，、;；|\s]+/)
+    .map(x => x.trim())
+    .filter(Boolean)
+    .slice(0, 14);
+  if (list.length) directionKeywordsCache[n] = list;
+  else delete directionKeywordsCache[n];
+}
+
+// 用户在「词」输入框里只填同义词；方向名本身永远算一个关键词
+function commitKeywordEdit(name, typed) {
+  const t = String(typed || '').trim();
+  setDirectionWords(name, t ? name + ',' + t : name);
+  return directionWordsOf(name);
+}
+
+function directionFallbackOptions() {
+  const RM = window.ResumeMatch;
+  if (RM && typeof RM.directionOptionsOf === 'function') return RM.directionOptionsOf({});
+  return [];
+}
+
 function directionBoxes() {
-  return Array.from(document.querySelectorAll('#pfDirectionList input[data-direction]'));
+  return Array.from(document.querySelectorAll('#pfDirectionItems input[data-direction]'));
 }
 
-function getSelectedDirections() {
-  const opts = (window.ResumeMatch && window.ResumeMatch.DIRECTION_OPTS) || ['软件', '硬件', 'AI测试'];
-  const picked = directionBoxes().filter(el => el.getAttribute('data-direction') !== '__all__' && el.checked)
+function pickedDirections() {
+  return directionBoxes()
+    .filter(el => el.checked && el.getAttribute('data-direction') !== '__all__')
     .map(el => el.getAttribute('data-direction'));
-  if (!picked.length || picked.length >= opts.length) return [];
-  return picked;
 }
 
-function setSelectedDirections(list) {
-  const opts = (window.ResumeMatch && window.ResumeMatch.DIRECTION_OPTS) || ['软件', '硬件', 'AI测试'];
-  const want = [].concat(list || []).filter(d => opts.indexOf(d) >= 0);
-  const all = !want.length || want.length >= opts.length;
-  directionBoxes().forEach((el) => {
-    const v = el.getAttribute('data-direction');
-    el.checked = all || v === '__all__' ? all : want.indexOf(v) >= 0;
-  });
-  const allBox = document.querySelector('#pfDirectionList input[data-direction="__all__"]');
-  if (allBox) allBox.checked = all;
+function directionSummary() {
+  if (directionUnlimited) return '全部（不限方向）';
+  const picked = pickedDirections();
+  if (!picked.length) return '全部（不限方向）';
+  const text = picked.join('、');
+  return text.length > 12 ? picked.length + ' 项方向' : text;
+}
+
+function syncDirectionUI() {
+  const allBox = document.getElementById('pfDirectionAll');
+  if (allBox) allBox.checked = directionUnlimited;
   const btn = document.getElementById('pfDirectionBtn');
-  if (btn) btn.textContent = all ? '全部' : want.join('、');
+  if (btn) btn.textContent = directionSummary();
+}
+
+// 平铺渲染：候选项来自简历解析 + 手工新增，每项带关键词与删除按钮
+function renderDirectionList(options, selected, forceAll) {
+  const box = document.getElementById('pfDirectionItems');
+  if (!box) return;
+  const opts = (Array.isArray(options) ? options : directionFallbackOptions()).slice();
+  directionOptionsCache = opts;
+  const sel = new Set([].concat(selected || []).map(String));
+  directionUnlimited = !!forceAll || !sel.size;
+  if (!opts.length) {
+    box.innerHTML = '<div class="msel-empty">解析简历后自动列出方向，也可在下方手动添加</div>';
+    syncDirectionUI();
+    return;
+  }
+  const rows = opts.map(n => {
+    const on = directionUnlimited || sel.has(n);
+    const words = directionWordsOf(n);
+    // 只有名字本身 = 还没设关键词，同义词认不出，标灰提示
+    const bare = words.length === 1 && words[0] === n;
+    return '<label class="dir' + (bare ? ' bare' : '') + '">'
+      + '<input type="checkbox" data-direction="' + escHtml(n) + '"' + (on ? ' checked' : '') + '>'
+      + '<span class="nm" data-edit="' + escHtml(n) + '" title="点击修改名称">' + escHtml(n) + '</span>'
+      + '<button type="button" class="msel-kw" data-kw="' + escHtml(n) + '" title="'
+      + (bare ? '未设关键词，只能字面匹配。点击设置' : escHtml(words.join('、')))
+      + '">' + (bare ? '词' : words.length) + '</button>'
+      + '<button type="button" class="msel-del" data-del="' + escHtml(n) + '" title="删除该方向">×</button>'
+      + '</label>';
+  });
+  // 一个方向都没有专属关键词：筛选会退化成字面匹配，几乎不拦人，必须明说
+  const allBare = opts.every(n => {
+    const w = directionWordsOf(n);
+    return w.length === 1 && w[0] === n;
+  });
+  if (allBare && !directionUnlimited) {
+    rows.push('<div class="msel-warn">方向还没有关键词，只能按名字字面匹配，'
+      + '认不出的岗位会全部放行。点上方「解析」重新生成，或点每行的「词」手填。</div>');
+  }
+  box.innerHTML = rows.join('');
+  syncDirectionUI();
+}
+
+// 点「词」就地编辑关键词：逗号分隔，回车/失焦保存，Esc 取消
+function beginKeywordEdit(btn) {
+  if (!btn || !btn.parentNode) return;
+  const name = btn.getAttribute('data-kw') || '';
+  if (!name) return;
+  const row = btn.closest('label.dir');
+  if (!row) return;
+  row.classList.add('editing');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'kw-edit';
+  input.placeholder = '关键词，逗号分隔';
+  input.value = directionWordsOf(name).filter(w => w !== name).join(', ');
+  btn.replaceWith(input);
+  input.focus();
+  try { input.select(); } catch (_) {}
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    if (commit) commitKeywordEdit(name, input.value);
+    renderDirectionList(directionOptionsCache, pickedDirections(), directionUnlimited);
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('change', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+// 点文字就地改名：回车/失焦保存，Esc 取消
+function beginDirectionEdit(span) {
+  if (!span || !span.parentNode) return;
+  const oldName = span.getAttribute('data-edit') || '';
+  if (!oldName) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'nm-edit';
+  input.maxLength = 12;
+  input.value = oldName;
+  span.replaceWith(input);
+  input.focus();
+  try { input.select(); } catch (_) {}
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const next = String(input.value || '').trim().slice(0, 12);
+    if (commit && next && next !== oldName) renameDirection(oldName, next);
+    else renderDirectionList(directionOptionsCache, pickedDirections(), directionUnlimited);
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('change', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+// 改名：保留勾选状态与位置；改成一个已存在的名字时合并，不留重复项
+function renameDirection(oldName, next) {
+  const names = directionOptionsCache;
+  const idx = names.indexOf(oldName);
+  if (idx < 0 || !next) return;
+  const boxes = directionBoxes();
+  const wasChecked = boxes.some(el => el.getAttribute('data-direction') === oldName && el.checked);
+  const sel = pickedDirections().filter(n => n !== oldName);
+  const dupIdx = names.findIndex((n, i) => i !== idx && n.toLowerCase() === next.toLowerCase());
+  let opts;
+  let target = next;
+  if (dupIdx >= 0) {
+    target = names[dupIdx];
+    opts = names.filter((_, i) => i !== idx);
+    const dupChecked = boxes.some(el => el.getAttribute('data-direction') === target && el.checked);
+    if (wasChecked && !dupChecked && sel.indexOf(target) < 0) sel.push(target);
+  } else {
+    opts = names.slice();
+    opts[idx] = next;
+    if (wasChecked && sel.indexOf(target) < 0) sel.push(target);
+  }
+  directionOptionsCache = opts;
+  // 关键词跟着改名走，原方向的同义词不能丢
+  const words = directionKeywordsCache[oldName];
+  if (words && words.length) {
+    delete directionKeywordsCache[oldName];
+    if (!directionKeywordsCache[target]) {
+      directionKeywordsCache[target] = words.map(w => (w === oldName ? target : w));
+    }
+  }
+  renderDirectionList(opts, sel, directionUnlimited);
+}
+
+// 新增自定义方向：立即勾选，名字本身作为匹配关键词
+function addDirection(name) {
+  const n = String(name || '').trim().slice(0, 12);
+  if (!n || n === '__all__') return;
+  if (!directionOptionsCache.some(x => x.toLowerCase() === n.toLowerCase())) {
+    if (directionOptionsCache.length >= 40) return;
+    directionOptionsCache = directionOptionsCache.concat([n]);
+  }
+  if (!directionKeywordsCache[n]) directionKeywordsCache[n] = [n];
+  const sel = pickedDirections();
+  if (sel.indexOf(n) < 0) sel.push(n);
+  renderDirectionList(directionOptionsCache, sel, directionUnlimited);
+}
+
+function removeDirection(name) {
+  const keep = pickedDirections().filter(x => x !== name);
+  directionOptionsCache = directionOptionsCache.filter(x => x !== name);
+  delete directionKeywordsCache[name];
+  delete otherDirectionsCache[name];
+  renderDirectionList(directionOptionsCache, keep, directionUnlimited);
+}
+
+// 「全部」勾上 → 存空数组（不限方向）；否则存勾选项，只匹配这些方向
+function getSelectedDirections() {
+  if (directionUnlimited) return [];
+  return pickedDirections();
 }
 
 function bindDirectionPicker() {
@@ -230,22 +451,74 @@ function bindDirectionPicker() {
     e.stopPropagation();
     wrap.classList.toggle('open');
   });
-  list.addEventListener('click', (e) => e.stopPropagation());
+  list.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const t = e.target;
+    const del = t && t.closest && t.closest('.msel-del');
+    if (del) {
+      e.preventDefault();
+      removeDirection(del.getAttribute('data-del'));
+      return;
+    }
+    if (t && t.closest && t.closest('#pfDirectionAdd')) {
+      e.preventDefault();
+      const input = document.getElementById('pfDirectionNew');
+      if (input) { addDirection(input.value); input.value = ''; }
+      return;
+    }
+    // 点「词」→ 就地编辑该方向的关键词（同样是阻止 label 的勾选切换）
+    const kwBtn = t && t.closest && t.closest('.msel-kw');
+    if (kwBtn) {
+      e.preventDefault();
+      beginKeywordEdit(kwBtn);
+      return;
+    }
+    // 点方向名字 → 就地改名（阻止 label 默认的勾选切换）
+    const nm = t && t.closest && t.closest('.nm');
+    if (nm) {
+      e.preventDefault();
+      beginDirectionEdit(nm);
+    }
+  });
   list.addEventListener('change', (e) => {
     const t = e.target;
     if (!t || !t.getAttribute) return;
-    const v = t.getAttribute('data-direction');
-    if (v === '__all__') {
-      if (t.checked) setSelectedDirections([]);
-      else {
-        directionBoxes().forEach((el) => { el.checked = false; });
-        const b = document.getElementById('pfDirectionBtn');
-        if (b) b.textContent = '全部';
+    if (t.id === 'pfDirectionAll') {
+      if (t.checked) {
+        // 回到不限方向：全部勾上
+        directionUnlimited = true;
+        for (const el of directionBoxes()) el.checked = true;
+      } else if (!directionBoxes().length) {
+        // 没有任何候选项时「全部」就是唯一状态
+        directionUnlimited = true;
+      } else {
+        // 进入筛选模式，先全部保留勾选，让用户取消不要的方向
+        directionUnlimited = false;
       }
+      syncDirectionUI();
       return;
     }
-    setSelectedDirections(getSelectedDirections());
+    if (!t.getAttribute('data-direction')) return;
+    // 取消某一项 = 隐式进入筛选模式
+    if (!t.checked) directionUnlimited = false;
+    // 一项都不剩时退回「全部」
+    if (!pickedDirections().length) {
+      directionUnlimited = true;
+      for (const el of directionBoxes()) el.checked = true;
+    }
+    syncDirectionUI();
   });
+  const inp = document.getElementById('pfDirectionNew');
+  if (inp) {
+    inp.addEventListener('click', (e) => e.stopPropagation());
+    inp.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      e.stopPropagation();
+      addDirection(inp.value);
+      inp.value = '';
+    });
+  }
   document.addEventListener('click', () => wrap.classList.remove('open'));
 }
 
@@ -265,7 +538,18 @@ function fillProfileEditor(p) {
   const sc = document.getElementById('pfScale');
   if (sc) sc.value = String(p.scaleMin > 0 ? p.scaleMin : 0);
   setSelectedDegrees(p.degrees || []);
-  setSelectedDirections(p.directions || []);
+  const dirOpts = (window.ResumeMatch && window.ResumeMatch.directionOptionsOf)
+    ? window.ResumeMatch.directionOptionsOf(p)
+    : directionFallbackOptions();
+  const dirSel = (window.ResumeMatch && window.ResumeMatch.selectedDirectionsOf)
+    ? window.ResumeMatch.selectedDirectionsOf(p)
+    : (p.directions || []);
+  // 方向关键词：AI 生成的那份，用户在「词」里改
+  directionKeywordsCache = Object.assign({}, (p && p.directionKeywords) || {});
+  otherDirectionsCache = Object.assign({}, (p && p.otherDirections) || {});
+  // directions 为空 = 不限方向（「全部」勾上）
+  renderDirectionList(dirOpts, dirSel, !(p.directions || []).length);
+  directionEditorReady = true;
   box.style.display = 'block';
 }
 
@@ -466,19 +750,31 @@ async function handleResumeParse() {
 async function saveProfileEdits() {
   try {
     const prev = await window.ResumeAI.loadProfile();
-    const raw = {
-      titles: splitProfileList(document.getElementById('pfTitles').value),
+    const titles = splitProfileList(document.getElementById('pfTitles').value);
+    if (!titles.length) throw new Error('期望职位不能为空');
+    const base = window.ResumeMatch.extractProfile(JSON.stringify({
+      titles,
       city: document.getElementById('pfCity').value.trim(),
       skills: splitProfileList(document.getElementById('pfSkills').value),
       workKeywords: splitProfileList(document.getElementById('pfWork').value),
       salaryMin: parseInt(document.getElementById('pfSalary').value, 10) || 0,
       scaleMin: parseInt(document.getElementById('pfScale').value, 10) || 0,
       degrees: getSelectedDegrees(),
+    }));
+    // 只保留还在候选里的方向关键词，删掉的方向不再留残留
+    const keywords = {};
+    for (const n of directionOptionsCache) {
+      const words = directionKeywordsCache[n];
+      if (Array.isArray(words) && words.length) keywords[n] = words.slice();
+    }
+    const profile = Object.assign({}, base, {
       directions: getSelectedDirections(),
-    };
-    if (!raw.titles.length) throw new Error('期望职位不能为空');
-    const profile = window.ResumeMatch.extractProfile(JSON.stringify(raw));
-    await window.ResumeAI.saveProfile(profile, { fileName: (prev && prev.fileName) || '' });
+      directionOptions: directionOptionsCache.slice(),
+      directionKeywords: keywords,
+      // AI 给的相邻干扰方向沿用上次解析结果
+      otherDirections: (prev && prev.otherDirections) || {},
+    });
+    await window.ResumeAI.saveProfile(profile, { fileName: (prev && prev.fileName) || '', keepParsedAt: true });
     fillProfileEditor(Object.assign({}, profile, { fileName: (prev && prev.fileName) || '' }));
     await markSaved('profile');
     ok('匹配规则已保存');
@@ -512,7 +808,30 @@ async function followActiveSite() {
     if (!tabs.length) tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const platform = platformFromUrl(tabs[0] && tabs[0].url);
     if (platform) switchTab(platform);
-  } catch (_) {}
+    return platform;
+  } catch (_) { return ''; }
+}
+
+// 侧栏只服务 BOSS / 智联 / 前程。切到别的页面时自己收起来，
+// background 也会做同一件事，这里是「点图标新开面板」等情况下的兜底。
+async function closePanelIfUnsupported() {
+  let tab = null;
+  try {
+    let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tabs.length) tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    tab = tabs[0] || null;
+  } catch (_) { return false; }
+  if (!tab) return false;
+  if (platformFromUrl(tab.url)) return false;
+  const api = chrome.sidePanel;
+  if (!api) return false;
+  if (typeof api.close === 'function') {
+    try { await api.close({ tabId: tab.id }); return true; } catch (_) {}
+    try { await api.close({ windowId: tab.windowId }); return true; } catch (_) {}
+  }
+  // 老版本没有 close()：禁用这个 tab 的侧栏，面板会跟着收起
+  try { await api.setOptions({ tabId: tab.id, enabled: false }); return true; } catch (_) {}
+  return false;
 }
 
 function renderBossList(jobs) {
@@ -669,6 +988,18 @@ function stopMatchProgressPoll(platform, timer) {
   chrome.storage.local.remove(platform + '_match_progress');
 }
 
+function progCountText(p) {
+  const dup = p.dupC ? '/' + p.dupC + '🔁' : '';
+  return `（${p.okC}✅${dup}/${p.failC}❌）`;
+}
+function allSettled(p) {
+  // 前程的「简历投递/页面跳转」属于跳过，不记成功也不记失败，
+  // 只靠 okC+dupC 判断会一直显示成红色失败
+  if (p.failC) return false;
+  if (p.idx >= p.total) return true;
+  return p.okC + (p.dupC || 0) === p.total;
+}
+
 function pollProgress(platform) {
   const key = platform + '_progress';
   const timer = setInterval(async () => {
@@ -678,25 +1009,25 @@ function pollProgress(platform) {
     if (p.logs) mergeProgressLogs(platform, p.logs);
     refreshDayCounts();
     if (platform === 'boss') {
-      document.getElementById('ptxt').textContent = `进度 ${p.idx}/${p.total}（${p.okC}✅/${p.failC}❌）`;
+      document.getElementById('ptxt').textContent = `进度 ${p.idx}/${p.total}${progCountText(p)}`;
       document.getElementById('pfill').style.width = `${Math.round(p.idx / p.total * 100)}%`;
-      setStatus(p.status, p.running ? '' : (p.okC === p.total ? 'ok' : 'er'));
+      setStatus(p.status, p.running ? '' : (allSettled(p) ? 'ok' : 'er'));
       if (!p.running) {
         clearInterval(timer); isRunning = false;
         document.getElementById('btnStart').disabled = false; hideCancel();
       }
     } else if (platform === 'zp') {
-      document.getElementById('zPtxt').textContent = `进度 ${p.idx}/${p.total}（${p.okC}✅/${p.failC}❌）`;
+      document.getElementById('zPtxt').textContent = `进度 ${p.idx}/${p.total}${progCountText(p)}`;
       document.getElementById('zPfill').style.width = `${Math.round(p.idx / p.total * 100)}%`;
-      zSetStatus(p.status, p.running ? '' : (p.okC === p.total ? 'ok' : 'er'));
+      zSetStatus(p.status, p.running ? '' : (allSettled(p) ? 'ok' : 'er'));
       if (!p.running) {
         clearInterval(timer); zIsRunning = false;
         document.getElementById('zStart').disabled = false; hideCancel();
       }
     } else {
-      document.getElementById('wPtxt').textContent = `进度 ${p.idx}/${p.total}（${p.okC}✅/${p.failC}❌）`;
+      document.getElementById('wPtxt').textContent = `进度 ${p.idx}/${p.total}${progCountText(p)}`;
       document.getElementById('wPfill').style.width = `${Math.round(p.idx / p.total * 100)}%`;
-      wSetStatus(p.status, p.running ? '' : (p.okC === p.total ? 'ok' : 'er'));
+      wSetStatus(p.status, p.running ? '' : (allSettled(p) ? 'ok' : 'er'));
       if (!p.running) {
         clearInterval(timer); wIsRunning = false;
         document.getElementById('wStart').disabled = false; hideCancel();
@@ -705,7 +1036,36 @@ function pollProgress(platform) {
   }, 500);
 }
 
+// 只改了方向勾选、没点「保存规则」就直接匹配，会让引擎读到上次的旧勾选。
+// 匹配前把当前方向状态静默落库一次（其它字段沿用已保存的画像）。
+async function persistDirections() {
+  try {
+    // 编辑器没渲染过 = 手上没有可信的勾选状态，直接沿用已存画像
+    if (!directionEditorReady) return;
+    const prev = await window.ResumeAI.loadProfile();
+    if (!prev || !Array.isArray(prev.titles) || !prev.titles.length) return;
+    const picked = getSelectedDirections();
+    const opts = directionOptionsCache.slice();
+    const keywords = {};
+    for (const n of opts) {
+      const words = directionKeywordsCache[n];
+      if (Array.isArray(words) && words.length) keywords[n] = words.slice();
+    }
+    const same = JSON.stringify(picked) === JSON.stringify(prev.directions || [])
+      && JSON.stringify(opts) === JSON.stringify(prev.directionOptions || [])
+      && JSON.stringify(keywords) === JSON.stringify(prev.directionKeywords || {});
+    if (same) return;
+    await window.ResumeAI.saveProfile(Object.assign({}, prev, {
+      directions: picked,
+      directionOptions: opts,
+      directionKeywords: keywords,
+      otherDirections: prev.otherDirections || {},
+    }), { fileName: prev.fileName || '', keepParsedAt: true });
+  } catch (_) {}
+}
+
 async function fetchBossByResume() {
+  await persistDirections();
   if (!(await requireUploadedResume())) {
     document.getElementById('fetchInfo').textContent = NEED_RESUME_MSG;
     return;
@@ -719,6 +1079,9 @@ async function fetchBossByResume() {
   const btn = document.getElementById('btnMatch');
   btn.disabled = true; btn.textContent = '⏳ 匹配中...';
   const matchPoll = startMatchProgressPoll('boss');
+  let loadedVer = '';
+  try { loadedVer = chrome.runtime.getManifest().version; } catch (_) {}
+  if (loadedVer) info('匹配引擎 v' + loadedVer);
   try {
     const { jobs, stopped, fallback, listCount, refineTotal, refinePassed } = await window.ResumeMatch.run({ tabId: tab.id, log: info });
     applyBossJobs(jobs, { fallback, listCount, refineTotal, refinePassed });
@@ -737,6 +1100,7 @@ async function fetchBossByResume() {
 }
 
 async function fetchZpByResume() {
+  await persistDirections();
   if (!(await requireUploadedResume())) {
     document.getElementById('zFetchInfo').textContent = NEED_RESUME_MSG;
     return;
@@ -882,6 +1246,7 @@ async function startZpBatch() {
   const jobs = zAllJobs.slice(0, cnt);
   const minInt = parseInt(document.getElementById('zMin').value) || 3;
   const maxInt = parseInt(document.getElementById('zMax').value) || 5;
+  chrome.storage.local.set({ minInt, maxInt });
 
   await chrome.storage.local.remove('zp_cancel');
   const tabs = await chrome.tabs.query({});
@@ -895,7 +1260,13 @@ async function startZpBatch() {
   const rt = (cookies.find(c => c.name === 'rt') || {}).value || '';
   if (!at || !rt) { err('缺少 at/rt token'); return; }
 
-  const resolved = await resolveZpResume(zlTab, at, rt);
+  let resolved;
+  try {
+    resolved = await resolveZpResume(zlTab, at, rt);
+  } catch (e) {
+    err('读取智联简历编号失败: ' + (e.message || e));
+    return;
+  }
   if (!resolved.resumeNumber) { err('未找到智联简历编号（页面+API均失败）'); return; }
 
   zIsRunning = true;
@@ -912,6 +1283,7 @@ async function startZpBatch() {
 }
 
 async function fetchW51ByResume() {
+  await persistDirections();
   if (!(await requireUploadedResume())) {
     document.getElementById('wFetchInfo').textContent = NEED_RESUME_MSG;
     return;
@@ -954,6 +1326,7 @@ async function startW51Batch() {
   const jobs = wAllJobs.slice(0, cnt);
   const minInt = parseInt(document.getElementById('wMin').value) || 3;
   const maxInt = parseInt(document.getElementById('wMax').value) || 5;
+  chrome.storage.local.set({ minInt, maxInt });
 
   await chrome.storage.local.remove('w51_cancel');
   const all = await chrome.tabs.query({});
@@ -973,16 +1346,14 @@ async function startW51Batch() {
   }
   const searchUrl = (wTab.url?.includes('/pc/search') ? wTab.url : '') || saved.w51_search_url || '';
 
-  const cookies = await chrome.cookies.getAll({ domain: '.51job.com' });
-  const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
-
   wIsRunning = true;
   document.getElementById('wStart').disabled = true;
   document.getElementById('wProg').style.display = '';
   showCancel();
   progressLogCursor.w51 = 0;
+  // 前程投递在页面上下文里点按钮，Cookie 自动带上，不需要传 cookieStr
   chrome.runtime.sendMessage({
-    action: 'w51_start', jobs, cookieStr, tabId: wTab.id, searchUrl, min: minInt, max: maxInt,
+    action: 'w51_start', jobs, tabId: wTab.id, searchUrl, min: minInt, max: maxInt,
   });
   pollProgress('w51');
 }
@@ -990,6 +1361,11 @@ async function startW51Batch() {
 document.addEventListener('DOMContentLoaded', async () => {
   bindDegreePicker();
   bindDirectionPicker();
+  // 显示已加载的版本，方便确认改动是否真的生效（没重载扩展会看到旧版本号）
+  const verEl = document.getElementById('appVersion');
+  if (verEl && chrome.runtime.getManifest) {
+    try { verEl.textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) {}
+  }
   const savedLogs = await chrome.storage.local.get('ui_logs');
   if (Array.isArray(savedLogs.ui_logs) && savedLogs.ui_logs.length) {
     sessionLogs = savedLogs.ui_logs.slice(-LOG_LIMIT);
@@ -1038,7 +1414,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('tab51').addEventListener('click', () => switchTab('51job'));
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes[dayCountKey('boss')] || changes[dayCountKey('zp')] || changes[dayCountKey('w51')]) {
+    if (changes[dayCountKey('boss')] || changes[dayCountKey('zp')] || changes[dayCountKey('w51')]
+      || changes.applied_ids_boss || changes.applied_ids_zp || changes.applied_ids_w51
+      || changes.w51_matched_ids) {
       refreshDayCounts();
     }
   });
@@ -1049,6 +1427,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btnSaveProfile').addEventListener('click', saveProfileEdits);
   document.getElementById('clearAppliedBoss')?.addEventListener('click', () => clearAppliedIds('boss'));
   document.getElementById('clearAppliedZp')?.addEventListener('click', () => clearAppliedIds('zp'));
+  document.getElementById('clearAppliedW51')?.addEventListener('click', () => clearAppliedIds('w51'));
   document.getElementById('btnToggleResume').addEventListener('click', () => {
     const card = document.getElementById('resumeCard');
     const open = card && card.classList.contains('collapsed');
@@ -1081,8 +1460,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderLogs();
   });
 
-  chrome.tabs.onActivated.addListener(() => { followActiveSite(); });
-  chrome.tabs.onUpdated.addListener((tabId, info) => {
-    if (info.status === 'complete' || info.url) followActiveSite();
+  chrome.tabs.onActivated.addListener(async () => {
+    if (await closePanelIfUnsupported()) return;
+    followActiveSite();
   });
+  chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+    if (info.status !== 'complete' && !info.url) return;
+    if (await closePanelIfUnsupported()) return;
+    followActiveSite();
+  });
+
+  // 点图标新开面板时不会触发 tab 事件，加载完先自查一次
+  await closePanelIfUnsupported();
 });

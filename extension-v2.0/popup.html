@@ -55,13 +55,39 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .field-row{display:flex;gap:8px}
 .field-row .field{flex:1;min-width:0}
 .msel{position:relative}
-.msel-btn{width:100%;padding:6px 8px;background:#0f0f23;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:12px;text-align:left;cursor:pointer;font-family:inherit}
+.msel-btn{width:100%;padding:6px 8px;background:#0f0f23;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:12px;text-align:left;cursor:pointer;font-family:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msel.open .msel-btn{border-color:#6366f1}
-.msel-list{display:none;position:absolute;z-index:8;left:0;right:0;top:100%;margin-top:2px;background:#0f0f23;border:1px solid #333;border-radius:4px;padding:4px 0;max-height:180px;overflow:auto}
+.msel-list{display:none;position:absolute;z-index:8;left:0;right:0;top:100%;margin-top:2px;background:#0f0f23;border:1px solid #333;border-radius:4px;max-height:240px;overflow:auto}
 .msel.open .msel-list{display:block}
 .msel-list label{display:flex;align-items:center;gap:6px;padding:4px 8px;color:#e0e0e0;font-size:11px;cursor:pointer}
+.msel-list > label:first-child{margin-top:4px}
+.msel-list > label:last-child{margin-bottom:4px}
 .msel-list label:hover{background:#16213e}
 .msel-list input{width:auto;margin:0;accent-color:#6366f1}
+.msel-list label.dir{padding:4px 8px}
+.msel-list label.dir .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:text;border-bottom:1px dashed transparent;padding-bottom:1px}
+.msel-list label.dir .nm:hover{border-bottom-color:#4b5563;color:#fff}
+.nm-edit{flex:1;min-width:0;padding:1px 4px;background:#16213e;border:1px solid #6366f1;border-radius:3px;color:#e0e0e0;font-size:11px;font-family:inherit}
+.nm-edit:focus{outline:none}
+.msel-del{width:16px;height:16px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border:0;border-radius:3px;background:transparent;color:#666;font-size:13px;line-height:1;cursor:pointer;font-family:inherit}
+.msel-del:hover{background:#2a2a4a;color:#f87171}
+.msel-list label.dir.bare .nm{color:#8b93a7}
+.msel-kw{flex-shrink:0;min-width:16px;height:16px;padding:0 3px;display:flex;align-items:center;justify-content:center;border:0;border-radius:3px;background:transparent;color:#6366f1;font-size:9px;line-height:1;cursor:pointer;font-family:inherit}
+.msel-kw:hover{background:#2a2a4a;color:#a5b4fc}
+.msel-list label.dir.bare .msel-kw{color:#4b5563}
+.msel-list label.dir.bare .msel-kw:hover{color:#a5b4fc}
+.kw-edit{flex:1;min-width:0;padding:1px 4px;background:#16213e;border:1px solid #6366f1;border-radius:3px;color:#e0e0e0;font-size:10px;font-family:inherit}
+.kw-edit:focus{outline:none}
+.msel-warn{margin:4px 8px 2px;padding:5px 6px;border-radius:4px;background:#3a2a1a;color:#fbbf24;font-size:10px;line-height:1.5;white-space:normal}
+.msel-add{display:flex;align-items:center;gap:4px;padding:6px 8px;border-top:1px solid #262646;position:sticky;bottom:0;background:#0f0f23}
+#pfDirectionList{left:auto;right:0;min-width:210px;max-width:270px}
+#pfDirectionItems label.dir:first-child{margin-top:0}
+#pfDirectionItems label.dir:last-child{margin-bottom:4px}
+.msel-add input{flex:1;min-width:0;padding:4px 6px;background:#16213e;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:11px;font-family:inherit}
+.msel-add input:focus{outline:none;border-color:#6366f1}
+.msel-add button{flex-shrink:0;padding:4px 8px;background:#6366f1;border:0;border-radius:4px;color:#fff;font-size:11px;cursor:pointer;font-family:inherit}
+.msel-add button:hover{background:#4f52d9}
+.msel-empty{padding:8px;color:#666;font-size:10px;line-height:1.5}
 .field textarea{min-height:64px;resize:vertical;line-height:1.5}
 .flash{font-size:11px;margin-top:6px;min-height:16px;line-height:1.4}
 .flash.ok{color:#4ade80}
@@ -84,6 +110,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 </style></head><body>
 <div class="hdr">
   <span>批量投递</span>
+  <span id="appVersion" style="font-size:10px;color:#555;margin-left:6px"></span>
   <button id="btnApi" type="button">API 设置</button>
 </div>
 <div class="card" id="apiPanel">
@@ -133,9 +160,25 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
       <label>期望职位（逗号分隔，用于搜索）</label>
       <input id="pfTitles" type="text" placeholder="测试工程师, 软件测试工程师">
     </div>
-    <div class="field">
-      <label>城市</label>
-      <input id="pfCity" type="text" placeholder="上海">
+    <div class="field-row">
+      <div class="field">
+        <label>城市</label>
+        <input id="pfCity" type="text" placeholder="上海">
+      </div>
+      <div class="field">
+        <label>方向</label>
+        <div class="msel" id="pfDirection">
+          <button type="button" class="msel-btn" id="pfDirectionBtn">全部</button>
+          <div class="msel-list" id="pfDirectionList">
+            <label class="all"><input type="checkbox" data-direction="__all__" id="pfDirectionAll" checked> 全部（不限方向）</label>
+            <div id="pfDirectionItems"></div>
+            <div class="msel-add">
+              <input type="text" id="pfDirectionNew" placeholder="新增方向…" maxlength="12">
+              <button type="button" id="pfDirectionAdd">添加</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="field-row">
     <div class="field">
@@ -179,18 +222,6 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
     </div>
     </div>
     <div class="field">
-      <label>方向</label>
-      <div class="msel" id="pfDirection">
-        <button type="button" class="msel-btn" id="pfDirectionBtn">全部</button>
-        <div class="msel-list" id="pfDirectionList">
-          <label><input type="checkbox" data-direction="__all__" checked> 全部</label>
-          <label><input type="checkbox" data-direction="软件" checked> 软件</label>
-          <label><input type="checkbox" data-direction="硬件" checked> 硬件</label>
-          <label><input type="checkbox" data-direction="AI测试" checked> AI 测试</label>
-        </div>
-      </div>
-    </div>
-    <div class="field">
       <label>技能（逗号或换行）</label>
       <textarea id="pfSkills" rows="4" placeholder="Python, Playwright, 接口测试"></textarea>
     </div>
@@ -216,7 +247,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
     <div class="day-cnt">今日已投 <b id="dayBoss">0</b> · 本机去重 <b id="appliedBoss">0</b>
       <button type="button" class="linkbtn" id="clearAppliedBoss" title="清空本机已投名单">清空</button></div>
     <button class="btn" id="btnMatch">📄 读取简历并匹配职位</button>
-    <div class="hint">优先用上方画像。有页面筛选就按筛选拉；否则按画像职位接口搜。再粗筛精排；本机已投下一轮跳过。</div>
+    <div class="hint">优先用上方画像。有求职期望/页面筛选/页面关键词就按页面拉；否则按画像职位接口搜。再粗筛精排；本机已投下一轮跳过。</div>
     <div class="info" id="fetchInfo"></div>
     <div class="prog" id="matchProg" style="display:none;margin-top:6px">
       <div class="bar"><div class="fill" id="matchFill"></div></div>
@@ -249,7 +280,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
     <div class="day-cnt">今日已投 <b id="dayZp">0</b> · 本机去重 <b id="appliedZp">0</b>
       <button type="button" class="linkbtn" id="clearAppliedZp" title="清空本机已投名单">清空</button></div>
     <button class="btn zp" id="zBtnMatch">📄 读取简历并匹配职位</button>
-    <div class="hint">优先用上方画像，按职位接口搜。自动排除派遣/代招等；粗筛后精排；本机已投下一轮跳过。需已登录智联。</div>
+    <div class="hint">优先用上方画像，按职位接口搜。自动排除派遣/代招等；未投不足会自动加深翻页并换关键词兜底；本机已投下一轮跳过。需已登录智联。</div>
     <div class="info" id="zFetchInfo"></div>
     <div class="prog" id="zMatchProg" style="display:none;margin-top:6px">
       <div class="bar"><div class="fill" id="zMatchFill"></div></div>
@@ -279,7 +310,8 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 <div class="panel w51" id="panel51">
   <div class="card">
     <div class="ttl">📄 按简历匹配拉取</div>
-    <div class="day-cnt">今日已投 <b id="dayW51">0</b></div>
+    <div class="day-cnt">今日已投 <b id="dayW51">0</b> · 本机去重 <b id="appliedW51">0</b>
+      <button type="button" class="linkbtn" id="clearAppliedW51" title="清空本机已投与已匹配记录">清空</button></div>
     <button class="btn w51" id="wBtnMatch">📄 读取简历并匹配职位</button>
     <div class="hint">自动排除派遣/校招/网申/简历投递。匹配读当前搜索列表；已匹配过的岗会跳过，本页无新岗自动翻页。换搜索关键词会重置「已匹配」记录。投递在<strong>后台复制的搜索页</strong>点申请。</div>
     <div class="info" id="wFetchInfo"></div>

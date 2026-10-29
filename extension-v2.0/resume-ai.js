@@ -161,7 +161,24 @@ window.ResumeAI = (() => {
     return out;
   }
 
-  // 名字 → 关键词数组，去掉泛词与空项
+  // 排除词清洗：允许比方向关键词更长一点（HIL台架、智能座舱 这类行话长度不定），
+  // 但同样拒收泛词——「测试」「产品」命中率太高，一挂上去整个池子就清空了。
+  const EXCLUDE_KW_MAX = 40;
+
+  function cleanExcludeKeywords(list) {
+    const out = [];
+    for (const raw of [].concat(list || [])) {
+      const w = String(raw || '').replace(/#.*$/, '').trim().slice(0, 20);
+      if (!w) continue;
+      if (GENERIC_KEYWORDS.has(w)) continue;
+      if (out.some(x => x.toLowerCase() === w.toLowerCase())) continue;
+      if (out.length >= EXCLUDE_KW_MAX) break;
+      out.push(w);
+    }
+    return out;
+  }
+
+  // 方向名 → 关键词数组，去掉泛词与空项
   function cleanKeywordMap(map) {
     const out = {};
     if (!map || typeof map !== 'object') return out;
@@ -205,6 +222,21 @@ window.ResumeAI = (() => {
     return { names, keywords };
   }
 
+  // AI 没给 excludeKeywords 时的兜底：把 otherDirections 里的行话摊平。
+  // 相邻方向的词本身就是「另一行」的标志，摊平后照样能命中即拦；
+  // 每个方向只取 2 个、总量截到 8 个，避免名单瞬间膨胀成噪音。
+  function excludeFromOther(other) {
+    const out = [];
+    for (const name of Object.keys(other || {})) {
+      const words = (other[name] || []).filter(w => String(w).length >= 2);
+      for (const w of words.slice(0, 2)) {
+        if (out.length >= 8) return out;
+        out.push(w);
+      }
+    }
+    return out;
+  }
+
   function profileFromParsed(parsed) {
     const titles = [].concat(parsed.titles || parsed.title || []).map(x => String(x || '').trim()).filter(Boolean);
     const skills = [].concat(parsed.skills || []).map(x => String(x || '').trim()).filter(Boolean);
@@ -214,6 +246,13 @@ window.ResumeAI = (() => {
     const dir = readDirections(parsed.directions);
     const other = readDirections(parsed.otherDirections);
     const hasDirs = parsed.directions !== undefined;
+    const hasOther = parsed.otherDirections !== undefined;
+    const aiExcl = parsed.excludeKeywords === undefined
+      ? null
+      : cleanExcludeKeywords(parsed.excludeKeywords);
+    const excl = (aiExcl && aiExcl.length)
+      ? aiExcl
+      : (hasOther ? excludeFromOther(other.keywords) : []);
     return {
       titles, city, skills, workKeywords,
       directions: hasDirs ? dir.names : undefined,
@@ -221,6 +260,8 @@ window.ResumeAI = (() => {
       // 重新解析时以这次结果为准：这次没给关键词就清空，别让上一次的旧词残留
       directionKeywords: hasDirs ? dir.keywords : undefined,
       otherDirections: parsed.otherDirections === undefined ? undefined : other.keywords,
+      // 一个都没有就不带这个字段，saveProfile 才不会把旧名单清空
+      excludeKeywords: (aiExcl !== null || hasOther) ? excl : undefined,
     };
   }
 
@@ -319,19 +360,24 @@ window.ResumeAI = (() => {
         content: '你是简历解析器。先在思考过程里归纳简历要点，最终只输出一个紧凑 JSON 对象，不要 markdown，不要解释。'
           + '字段：titles(字符串数组,3到5个求职职位近义名)、city(单个城市名,不要“市”字)、'
           + 'skills(技能数组,最多15个)、workKeywords(工作内容关键词数组,8到15个)、'
-          + 'directions(数组,2到6项)、otherDirections(对象)。'
+          + 'directions(数组,2到6项)、otherDirections(对象)、excludeKeywords(字符串数组,4到8个)。'
           + 'directions 的每一项是 {"name":"方向名","keywords":["关键词"]}：'
           + 'name 要从这份简历里归纳出他真正在做的岗位方向，2到8字，用该行业最通行的叫法（例如 交互设计、用户研究、软件测试、自动化测试、后端、数据分析、财务会计、新媒体运营），'
           + '不局限于互联网技术岗，任何职业都可以；'
           + 'keywords 给4到10个这个词方向专属的检索词，包含岗位标题里常见的同义说法与中英写法（例如 交互设计 → 交互设计、UX、用户体验、原型、Axure、信息架构）。'
           + 'keywords 严禁使用 工程师、测试、开发、设计、产品、运营、经理、专员、高级、资深、自动化、相关、经验 这类没有区分度的泛词，'
           + '否则同族方向会互相抢；要能靠这些词把本方向与相邻方向区分开。'
-          + 'otherDirections 是对象 {"相邻方向名":["关键词"]}，给5到8个与本简历同领域、但这份简历并不符合的方向及其专属词，'
+          + 'otherDirections 是对象 {"相邻方向名":["关键词"]}，给4到6个与本简历同领域、但这份简历并不符合的方向及其专属词，'
           + '用来在匹配时把这类岗位排除掉；它的关键词规则与 directions 相同。'
           + 'otherDirections 要优先列出「最容易被本简历方向的词吞并、但其实是另一行」的那些岗位族，'
           + '并把它们的行话写进关键词（例如做软件测试的简历，要给出 硬件测试/汽车电子测试，'
           + '关键词含 座舱、车载、台架、HIL、CAN、BMS、GTS、示波器、PCB 这类；'
           + '做交互设计的简历，要给出 视觉设计、产品经理、平面设计）。'
+          + 'excludeKeywords 是要直接拦掉的岗位行话/行业黑话，4到8个，'
+          + '用来做「命中即排除」的关键词黑名单：给那些一出现就说明这不是他要找的岗位的词，'
+          + '例如做软件测试的简历给 车载、座舱、台架、HIL、CAN、BMS，做互联网后端的简历给 驻场、外包、实施。'
+          + '这些词要求具体、有辨识度，严禁用 工程师、测试、开发、产品、运营、管理、高级、资深、助理、相关、经验、'
+          + '以及 directions 里的方向名本身；不确定能命中「另一行」的不要写，宁可少给。'
           + '按简历实际情况归纳，不要编造简历里没有的技能。',
       },
       {
@@ -427,8 +473,24 @@ window.ResumeAI = (() => {
     return s.ai_profile || null;
   }
 
+  // 方向名数组清洗：去空白、大小写不敏感去重、截一下
+  function cleanDirections(list) {
+    const out = [];
+    for (const raw of [].concat(list || [])) {
+      const n = String(raw || '').trim().slice(0, 20);
+      if (!n) continue;
+      if (out.some(x => x.toLowerCase() === n.toLowerCase())) continue;
+      out.push(n);
+    }
+    return out;
+  }
+
+  const lower = s => String(s || '').toLowerCase();
+  const hasCI = (list, n) => (list || []).some(x => lower(x) === lower(n));
+
   async function saveProfile(profile, extra) {
     const prev = (await chrome.storage.local.get('ai_profile')).ai_profile || {};
+    const wasReparse = !(extra && extra.keepParsedAt);
     const dirs = profile.directions !== undefined
       ? (Array.isArray(profile.directions) ? profile.directions : [])
       : (prev.directions || []);
@@ -441,17 +503,60 @@ window.ResumeAI = (() => {
     } else {
       dirOpts = Array.isArray(prev.directionOptions) ? prev.directionOptions : [];
     }
+    // 勾选方向按墓碑合并：重新解析不会把用户手取消的方向又勾回来，
+    // 同时保留上一轮已经勾上的方向（AI 这次没列出来也不丢）
+    // 三份「用户记忆」：编辑器保存时会带上来；解析时用存储里的
+    const removedDirs = Array.isArray(profile.directionsRemoved)
+      ? profile.directionsRemoved
+      : (Array.isArray(prev.directionsRemoved) ? prev.directionsRemoved : []);
+    const editedList = profile.directionKeywordsEdited !== undefined
+      ? profile.directionKeywordsEdited
+      : (prev.directionKeywordsEdited || []);
+    const removedKw = Array.isArray(profile.excludeKeywordsRemoved)
+      ? profile.excludeKeywordsRemoved
+      : (Array.isArray(prev.excludeKeywordsRemoved) ? prev.excludeKeywordsRemoved : []);
+    const finalDirs = wasReparse
+      ? cleanDirections([].concat(dirs, prev.directions || [])).filter(n => !hasCI(removedDirs, n))
+      : cleanDirections(dirs);
     // 重新解析时 AI 会给整套新关键词，要以新结果为准；
-    // 只是改匹配规则时（没带 keywords）沿用旧的，别把用户手改的词冲掉
+    // 只是改匹配规则时（没带 keywords）沿用旧的，别把用户手改的词冲掉。
+    // 但用户手改过的那个方向的词要保住——AI 重写会把他的调整冲掉。
     const reParsed = profile.directionKeywords !== undefined;
-    const dirKeywords = reParsed
-      ? cleanKeywordMap(profile.directionKeywords)
-      : (prev.directionKeywords && typeof prev.directionKeywords === 'object' ? prev.directionKeywords : {});
+    const aiDirKw = cleanKeywordMap(profile.directionKeywords);
+    const prevDirKw = (prev.directionKeywords && typeof prev.directionKeywords === 'object')
+      ? prev.directionKeywords : {};
+    const edited = new Set([].concat(editedList || []).map(lower));
+    let dirKeywords;
+    if (wasReparse && reParsed) {
+      dirKeywords = Object.assign({}, aiDirKw);
+      for (const k of Object.keys(prevDirKw)) {
+        if (edited.has(lower(k))) dirKeywords[k] = prevDirKw[k];
+      }
+    } else {
+      dirKeywords = reParsed ? aiDirKw : prevDirKw;
+    }
     // 相邻干扰方向只在「重新解析」时由 AI 给出；没给就等于这次没有，
     // 不能沿用上一份简历的旧方向，否则换行业后会被它误杀
     const otherDirections = profile.otherDirections !== undefined
       ? cleanKeywordMap(profile.otherDirections)
       : {};
+    // 排除词：并集 − 手删墓碑。手加的留下、AI 新一轮的追加进来、
+    // 用户删掉的不会被 AI 再加回来；重新解析不会因为 AI 漏给就清空整份名单。
+    const prevKwEx = Array.isArray(prev.excludeKeywords) ? prev.excludeKeywords : [];
+    const aiKwEx = profile.excludeKeywords !== undefined
+      ? cleanExcludeKeywords(profile.excludeKeywords)
+      : null;
+    let excludeKeywords;
+    // 重新解析时用「并集 − 墓碑」；只有明确带了新词才合并，
+    // AI 这次没给（null）就沿用旧名单，不能因为 AI 漏给就清空。
+    if (wasReparse && aiKwEx !== null) {
+      excludeKeywords = cleanExcludeKeywords([].concat(prevKwEx, aiKwEx))
+        .filter(w => !hasCI(removedKw, w));
+    } else if (aiKwEx !== null) {
+      excludeKeywords = aiKwEx;
+    } else {
+      excludeKeywords = cleanExcludeKeywords(prevKwEx);
+    }
     const data = {
       titles: profile.titles,
       city: profile.city || '',
@@ -462,10 +567,15 @@ window.ResumeAI = (() => {
       degrees: profile.degrees !== undefined
         ? (Array.isArray(profile.degrees) ? profile.degrees : [])
         : (prev.degrees || []),
-      directions: dirs,
+      directions: finalDirs,
       directionOptions: dirOpts,
       directionKeywords: dirKeywords,
       otherDirections,
+      excludeKeywords,
+      // 三份「用户记忆」：重解析时用来挡住 AI 的覆盖
+      excludeKeywordsRemoved: removedKw.slice(),
+      directionsRemoved: removedDirs.slice(),
+      directionKeywordsEdited: Array.from(edited),
       fileName: (extra && extra.fileName) || prev.fileName || '',
       // 只改匹配规则时沿用上次解析时间，别让侧边栏显示成「刚解析过」
       parsedAt: (extra && extra.keepParsedAt && prev.parsedAt) ? prev.parsedAt : Date.now(),

@@ -3,7 +3,7 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;min-height:100%}
-body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:10px;font-size:12px}
+body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:10px;font-size:12px;display:flex;flex-direction:column;min-height:100vh}
 .card{background:#16213e;border-radius:8px;padding:10px;margin-bottom:8px}
 .fold-hd{width:100%;display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:0;border:none;background:transparent;color:#888;font-size:11px;cursor:pointer;font-family:inherit;text-align:left}
 .fold-hd .fold-sum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#666;font-weight:400}
@@ -24,7 +24,42 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .panel.zp .fill{background:linear-gradient(90deg,#f093fb,#f5576c)}
 .st{font-size:11px;margin-top:3px}.ok{color:#4ade80}.er{color:#f87171}
 .info{font-size:11px;color:#888;margin-top:4px;min-height:16px}
+/* 没有结果文案时不要占位：「匹配中」下面不该留一块空白（min-height 只在有内容时生效） */
+.info:empty{display:none}
 .joblist{margin-top:6px;max-height:min(320px,38vh);overflow-y:auto;display:none;font-size:11px;line-height:1.6}
+/* 列表条目：逐条淡入上浮，delay 由 JS 按下标给 */
+.joblist .jrow{display:flex;gap:6px;align-items:baseline;padding:2px 0;border-bottom:1px solid #222;opacity:0;animation:jrowIn .26s cubic-bezier(.22,1,.36,1) forwards}
+.joblist .jrow:last-child{border-bottom:none}
+.joblist .jidx{flex-shrink:0}
+.joblist .jmain{flex:1;min-width:0}
+.joblist .jname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.joblist .jsub{font-size:10px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 分数固定在最右一列：两位数/一位数右对齐，不因宽度变化跳动 */
+.joblist .jscore{color:#fbbf24;flex:0 0 auto;min-width:18px;text-align:right;font-size:10px;line-height:16px;font-variant-numeric:tabular-nums}
+/* 忽略按钮：与分数同一行基线、右对齐在分数左一格；平时隐藏，hover 该行才出现。
+   用 visibility 隐藏而不是 display:none，宽度始终占位，hover 时不抖动 */
+.joblist .jignore{flex:0 0 auto;min-width:24px;margin:0;padding:0;border:none;background:none;cursor:pointer;
+  font-size:10px;line-height:16px;text-align:right;color:#8b8b8b;white-space:nowrap;font-family:inherit;
+  opacity:0;visibility:hidden;
+  transition:opacity .12s ease,visibility 0s linear .12s}
+.joblist .jrow:hover .jignore,.joblist .jrow:focus-within .jignore{opacity:1;visibility:visible;
+  transition:opacity .12s ease,visibility 0s}
+.joblist .jignore:hover{color:#f87171;text-decoration:underline}
+/* 已忽略的行：删除线 + 「恢复」常显，方便一眼找到并撤销 */
+.joblist .jrow.ignored .jignore{opacity:1;visibility:visible;color:#6b7280}
+.joblist .jrow.ignored .jignore:hover{color:#4ade80}
+.joblist .jrow.ignored .jname{text-decoration:line-through;color:#666}
+.joblist .jrow.ignored .jsub{opacity:.5}
+.joblist .jrow.ignored .jscore{opacity:.4}
+@keyframes jrowIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+/* 重新匹配前：旧结果先淡出上移，再收起来 */
+.joblist.clearing{animation:jlistOut .18s ease-in forwards}
+@keyframes jlistOut{from{opacity:1}to{opacity:0;transform:translateY(-6px)}}
+.info.flash{animation:infoFlash .5s ease-out}
+@keyframes infoFlash{from{color:#4ade80}to{color:#888}}
+@media (prefers-reduced-motion:reduce){
+  .joblist .jrow,.joblist.clearing,.info.flash{animation:none;opacity:1}
+}
 .toolbar{display:flex;gap:4px;margin-top:4px}
 .toolbar button{flex:1;padding:3px 6px;border:1px solid #333;border-radius:4px;background:transparent;color:#666;font-size:10px;cursor:pointer}
 .toolbar button:hover{color:#aaa;border-color:#555}
@@ -80,15 +115,69 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .kw-edit:focus{outline:none}
 .msel-warn{margin:4px 8px 2px;padding:5px 6px;border-radius:4px;background:#3a2a1a;color:#fbbf24;font-size:10px;line-height:1.5;white-space:normal}
 .msel-add{display:flex;align-items:center;gap:4px;padding:6px 8px;border-top:1px solid #262646;position:sticky;bottom:0;background:#0f0f23}
-#pfDirectionList{left:auto;right:0;min-width:210px;max-width:270px}
 #pfDirectionItems label.dir:first-child{margin-top:0}
 #pfDirectionItems label.dir:last-child{margin-bottom:4px}
+/* 排除列表里名字要能就地改，保留手型光标与下划线暗示 */
+#pfExcludeItems label.dir .nm{cursor:text}
+#pfExcludeItems label.dir:first-child{margin-top:0}
+#pfExcludeItems label.dir:last-child{margin-bottom:4px}
+.msel-note{margin:4px 8px;padding:0 0 4px;color:#7a8299;font-size:10px;line-height:1.5;white-space:normal}
+#pfExcludeList{max-height:340px}
+.msel-sep{border-top:1px solid #262646;padding:6px 0 4px}
+.msel-sep-hd{display:flex;flex-direction:column;gap:1px;padding:0 8px 4px;color:#8b93a7;font-size:10px}
+.msel-sep-tip{color:#5b627a}
+.msel-sep .auto{opacity:.55}
+.msel-sep .auto .nm{color:#8b93a7;cursor:default}
+.msel-conv{flex-shrink:0;padding:1px 5px;border:1px solid #3a3a5e;border-radius:3px;background:transparent;color:#a5b4fc;font-size:9px;line-height:1.4;cursor:pointer;font-family:inherit}
+.msel-conv:hover{background:#2a2a4a;border-color:#6366f1;color:#fff}
+.msel.disabled .msel-btn{opacity:.45;cursor:not-allowed}
+.msel.disabled .msel-list{display:none}
 .msel-add input{flex:1;min-width:0;padding:4px 6px;background:#16213e;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:11px;font-family:inherit}
 .msel-add input:focus{outline:none;border-color:#6366f1}
 .msel-add button{flex-shrink:0;padding:4px 8px;background:#6366f1;border:0;border-radius:4px;color:#fff;font-size:11px;cursor:pointer;font-family:inherit}
 .msel-add button:hover{background:#4f52d9}
 .msel-empty{padding:8px;color:#666;font-size:10px;line-height:1.5}
-.field textarea{min-height:64px;resize:vertical;line-height:1.5}
+.field textarea{min-height:56px;resize:vertical;line-height:1.5;overflow-y:auto;scrollbar-gutter:stable}
+/* 暗色细滚动条：覆盖 textarea / 列表 / 日志，去掉系统默认的白条 */
+*{scrollbar-width:thin;scrollbar-color:#3a3a52 transparent}
+*::-webkit-scrollbar{width:8px;height:8px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:#333;border-radius:4px;border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-thumb:hover{background:#555;background-clip:content-box}
+/* 公司黑名单 chips */
+.blk-add{display:flex;align-items:center;gap:4px;margin-top:6px}
+.blk-add input{flex:1;min-width:0;padding:4px 6px;background:#16213e;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:11px;font-family:inherit}
+.blk-add input:focus{outline:none;border-color:#6366f1}
+.blk-add button{flex-shrink:0;padding:4px 8px;background:#6366f1;border:0;border-radius:4px;color:#fff;font-size:11px;cursor:pointer;font-family:inherit}
+.blk-add button:hover{background:#4f52d9}
+/* 黑名单 chips 最多约 5 行半（行高 21 + 间距 4），再多就内部滚动：
+   列表涨到几十家也不会把「导出/恢复默认」和下方提示挤出屏幕 */
+#blkChips{
+  max-height:min(140px,30vh);overflow-y:auto;padding-right:2px;
+  overscroll-behavior:contain;scrollbar-gutter:stable;
+}
+#blkChips::-webkit-scrollbar{width:6px}
+#blkChips::-webkit-scrollbar-thumb{background:#3a4460;background-clip:content-box}
+#blkChips::-webkit-scrollbar-thumb:hover{background:#4d5a7d;background-clip:content-box}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.chips:empty{display:none}
+.chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:2px 4px 2px 7px;border-radius:10px;background:#0f0f23;border:1px solid #333;color:#ccc;font-size:10px;line-height:1.5}
+.chip .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;cursor:text}
+.chip .kw-edit{flex:0 0 108px;width:108px;font-size:10px;padding:0 3px}
+.chip .x{flex-shrink:0;padding:0 2px;border:0;background:transparent;color:#666;font-size:11px;line-height:1;cursor:pointer;font-family:inherit}
+.chip .x:hover{color:#f87171}
+/* 黑名单标题行：导出按钮紧跟「N 家」后面，「收起」仍贴最右。
+   标题行是 role=button 的 div，导出是行内真按钮，两条要互不干扰。 */
+.blk-hd{cursor:pointer;border-radius:4px}
+.blk-hd:focus-visible{outline:1px solid #6366f1;outline-offset:2px}
+.blk-hd .fold-sum{flex:0 1 auto;overflow:visible;text-overflow:clip}
+.blk-hd .blk-exp{flex-shrink:0;margin-left:0;font-size:10px}
+.blk-hd .fold-caret{margin-left:auto}
+/* 提示在左、按钮靠右：右边缘和下面 .hint 的文字右边缘对齐 */
+.blk-foot{display:flex;align-items:baseline;gap:8px;margin-top:6px}
+.blk-foot .flash{flex:1 1 auto;min-width:0;margin-top:0}
+.blk-actions{display:flex;flex-shrink:0;gap:10px;margin-top:0}
+.blk-actions .linkbtn{margin-left:0}
 .flash{font-size:11px;margin-top:6px;min-height:16px;line-height:1.4}
 .flash.ok{color:#4ade80}
 .flash.er{color:#f87171}
@@ -107,6 +196,12 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .think-box.show{display:block}
 .think-hd{font-size:10px;color:#888;margin-bottom:4px}
 #thinkText{white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.55;color:#9ca3af;font-family:inherit;min-height:12px}
+/* 日志区：吃掉页面剩余高度，底边距由 body 的 padding 给，正好等于左右边距（10px） */
+#log{flex:1 1 0;min-height:min(220px,24vh);margin-top:8px;background:#0f0f23;border-radius:8px;padding:8px;overflow-y:auto;font-family:monospace;font-size:10px;line-height:1.6;color:#888}
+/* 简历卡片收起后整页变短：日志下限抬高，剩下的高度自然归它 */
+body.resume-collapsed #log{min-height:min(320px,48vh)}
+/* 还没有日志时不要撑出一大块空框 */
+#log:empty{flex-grow:0;min-height:26px}
 </style></head><body>
 <div class="hdr">
   <span>批量投递</span>
@@ -166,7 +261,50 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
         <input id="pfCity" type="text" placeholder="上海">
       </div>
       <div class="field">
-        <label>方向</label>
+        <label>薪资（最低月薪）</label>
+        <select id="pfSalary">
+          <option value="0">不限</option>
+          <option value="8">8K+</option>
+          <option value="10">10K+</option>
+          <option value="12">12K+</option>
+          <option value="15">15K+</option>
+          <option value="20">20K+</option>
+          <option value="25">25K+</option>
+          <option value="30">30K+</option>
+        </select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>公司规模</label>
+        <select id="pfScale">
+          <option value="0">不限</option>
+          <option value="20">20人+</option>
+          <option value="100">100人+</option>
+          <option value="500">500人+</option>
+          <option value="1000">1000人+</option>
+          <option value="10000">10000人+</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>学历</label>
+        <div class="msel" id="pfDegree">
+          <button type="button" class="msel-btn" id="pfDegreeBtn">全部</button>
+          <div class="msel-list" id="pfDegreeList">
+            <label><input type="checkbox" data-degree="__all__" checked> 全部</label>
+            <label><input type="checkbox" data-degree="高中" checked> 高中</label>
+            <label><input type="checkbox" data-degree="中专" checked> 中专</label>
+            <label><input type="checkbox" data-degree="大专" checked> 大专</label>
+            <label><input type="checkbox" data-degree="本科" checked> 本科</label>
+            <label><input type="checkbox" data-degree="硕士" checked> 硕士</label>
+            <label><input type="checkbox" data-degree="博士" checked> 博士</label>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>方向选择</label>
         <div class="msel" id="pfDirection">
           <button type="button" class="msel-btn" id="pfDirectionBtn">全部</button>
           <div class="msel-list" id="pfDirectionList">
@@ -179,55 +317,60 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
           </div>
         </div>
       </div>
-    </div>
-    <div class="field-row">
-    <div class="field">
-      <label>最低月薪</label>
-      <select id="pfSalary">
-        <option value="0">不限</option>
-        <option value="8">8K+</option>
-        <option value="10">10K+</option>
-        <option value="12">12K+</option>
-        <option value="15">15K+</option>
-        <option value="20">20K+</option>
-        <option value="25">25K+</option>
-        <option value="30">30K+</option>
-      </select>
-    </div>
-    <div class="field">
-      <label>公司规模</label>
-      <select id="pfScale">
-        <option value="0">不限</option>
-        <option value="20">20人+</option>
-        <option value="100">100人+</option>
-        <option value="500">500人+</option>
-        <option value="1000">1000人+</option>
-        <option value="10000">10000人+</option>
-      </select>
-    </div>
-    <div class="field">
-      <label>学历</label>
-      <div class="msel" id="pfDegree">
-        <button type="button" class="msel-btn" id="pfDegreeBtn">全部</button>
-        <div class="msel-list" id="pfDegreeList">
-          <label><input type="checkbox" data-degree="__all__" checked> 全部</label>
-          <label><input type="checkbox" data-degree="高中" checked> 高中</label>
-          <label><input type="checkbox" data-degree="中专" checked> 中专</label>
-          <label><input type="checkbox" data-degree="大专" checked> 大专</label>
-          <label><input type="checkbox" data-degree="本科" checked> 本科</label>
-          <label><input type="checkbox" data-degree="硕士" checked> 硕士</label>
-          <label><input type="checkbox" data-degree="博士" checked> 博士</label>
+      <div class="field">
+        <label>排除词</label>
+        <div class="msel" id="pfExclude">
+          <button type="button" class="msel-btn" id="pfExcludeBtn">未设置</button>
+          <div class="msel-list" id="pfExcludeList">
+            <div class="msel-note">命中这些词的岗位直接排除（岗位名/技能/标签/JD 都算），优先级高于方向选择。</div>
+            <div id="pfExcludeItems"></div>
+            <div class="msel-sep" id="pfExcludeAutoWrap">
+              <div class="msel-sep-hd">
+                <span>未勾选方向</span>
+                <span class="msel-sep-tip">只读，点「转为排除词」把它的行话并进来</span>
+              </div>
+              <div id="pfExcludeAuto"></div>
+            </div>
+            <div class="msel-add">
+              <input type="text" id="pfExcludeNew" placeholder="新增排除词，如 车载" maxlength="20">
+              <button type="button" id="pfExcludeAdd">添加</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
+    <div class="hint" id="pfExcludeHint" style="display:none">方向选了「全部」时排除词不生效；重新勾选具体方向后恢复。</div>
+    <div class="field-row">
+      <div class="field">
+        <label>技能</label>
+        <textarea id="pfSkills" placeholder="Python, Playwright, 接口测试"></textarea>
+      </div>
+      <div class="field">
+        <label>工作关键词</label>
+        <textarea id="pfWork" placeholder="自动化, 接口, 质量保障"></textarea>
+      </div>
     </div>
     <div class="field">
-      <label>技能（逗号或换行）</label>
-      <textarea id="pfSkills" rows="4" placeholder="Python, Playwright, 接口测试"></textarea>
-    </div>
-    <div class="field">
-      <label>工作内容关键词（逗号或换行）</label>
-      <textarea id="pfWork" rows="5" placeholder="自动化, 接口, 质量保障"></textarea>
+      <div class="fold-hd blk-hd" id="btnBlkToggle" role="button" tabindex="0" aria-expanded="false">
+        <span>公司黑名单</span>
+        <span class="fold-sum" id="blkSum"></span>
+        <button type="button" class="linkbtn blk-exp" id="blkExport" title="导出为 txt，可直接替换 blocklist/outsource-companies.txt">导出黑名单</button>
+        <span class="fold-caret" id="blkCaret">展开</span>
+      </div>
+      <div id="blkBody" style="display:none">
+        <div class="blk-add">
+          <input type="text" id="blkNew" placeholder="输入公司名，如 中软国际" maxlength="30">
+          <button type="button" id="blkAdd">加入</button>
+        </div>
+        <div class="chips" id="blkChips"></div>
+        <div class="blk-foot">
+          <div class="flash" id="blkMsg"></div>
+          <div class="blk-actions">
+            <button type="button" class="linkbtn" id="blkReset">恢复默认</button>
+          </div>
+        </div>
+        <div class="hint">三个平台通用，公司名包含即过滤。默认名单取自 blocklist/outsource-companies.txt，首次加载后存进本地，可随意增删改；点「名字」可改名。</div>
+      </div>
     </div>
     <button class="btn ghost" id="btnSaveProfile" style="margin-top:8px">保存匹配规则</button>
     <div class="flash" id="profileSaveMsg"></div>
@@ -245,7 +388,9 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
   <div class="card">
     <div class="ttl">📄 按简历匹配拉取</div>
     <div class="day-cnt">今日已投 <b id="dayBoss">0</b> · 本机去重 <b id="appliedBoss">0</b>
-      <button type="button" class="linkbtn" id="clearAppliedBoss" title="清空本机已投名单">清空</button></div>
+      <button type="button" class="linkbtn" id="clearAppliedBoss" title="清空本机已投名单">清空</button>
+      · 已忽略 <b id="ignoredBoss">0</b>
+      <button type="button" class="linkbtn" id="clearIgnoredBoss" title="清空忽略名单，忽略的岗位会重新出现">清空</button></div>
     <button class="btn" id="btnMatch">📄 读取简历并匹配职位</button>
     <div class="hint">优先用上方画像。有求职期望/页面筛选/页面关键词就按页面拉；否则按画像职位接口搜。再粗筛精排；本机已投下一轮跳过。</div>
     <div class="info" id="fetchInfo"></div>
@@ -264,6 +409,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
       <label>间隔</label><input id="min" type="number" value="3" min="2"><label>~</label><input id="max" type="number" value="5" min="3"><label>秒</label>
     </div>
     <button class="btn start" id="btnStart">🚀 开始批量打招呼</button>
+    <div class="hint" id="applyHintBoss"></div>
     <div class="prog" id="prog">
       <div class="bar"><div class="fill" id="pfill"></div></div>
       <div style="display:flex;justify-content:space-between;margin-top:2px">
@@ -278,7 +424,9 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
   <div class="card">
     <div class="ttl">📄 按简历匹配拉取</div>
     <div class="day-cnt">今日已投 <b id="dayZp">0</b> · 本机去重 <b id="appliedZp">0</b>
-      <button type="button" class="linkbtn" id="clearAppliedZp" title="清空本机已投名单">清空</button></div>
+      <button type="button" class="linkbtn" id="clearAppliedZp" title="清空本机已投名单">清空</button>
+      · 已忽略 <b id="ignoredZp">0</b>
+      <button type="button" class="linkbtn" id="clearIgnoredZp" title="清空忽略名单，忽略的岗位会重新出现">清空</button></div>
     <button class="btn zp" id="zBtnMatch">📄 读取简历并匹配职位</button>
     <div class="hint">优先用上方画像，按职位接口搜。自动排除派遣/代招等；未投不足会自动加深翻页并换关键词兜底；本机已投下一轮跳过。需已登录智联。</div>
     <div class="info" id="zFetchInfo"></div>
@@ -297,6 +445,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
       <label>间隔</label><input id="zMin" type="number" value="3" min="2"><label>~</label><input id="zMax" type="number" value="5" min="3"><label>秒</label>
     </div>
     <button class="btn zp start" id="zStart">🚀 开始批量投递</button>
+    <div class="hint" id="applyHintZp"></div>
     <div class="prog" id="zProg">
       <div class="bar"><div class="fill" id="zPfill"></div></div>
       <div style="display:flex;justify-content:space-between;margin-top:2px">
@@ -311,7 +460,9 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
   <div class="card">
     <div class="ttl">📄 按简历匹配拉取</div>
     <div class="day-cnt">今日已投 <b id="dayW51">0</b> · 本机去重 <b id="appliedW51">0</b>
-      <button type="button" class="linkbtn" id="clearAppliedW51" title="清空本机已投与已匹配记录">清空</button></div>
+      <button type="button" class="linkbtn" id="clearAppliedW51" title="清空本机已投与已匹配记录">清空</button>
+      · 已忽略 <b id="ignoredW51">0</b>
+      <button type="button" class="linkbtn" id="clearIgnoredW51" title="清空忽略名单，忽略的岗位会重新出现">清空</button></div>
     <button class="btn w51" id="wBtnMatch">📄 读取简历并匹配职位</button>
     <div class="hint">自动排除派遣/校招/网申/简历投递。匹配读当前搜索列表；已匹配过的岗会跳过，本页无新岗自动翻页。换搜索关键词会重置「已匹配」记录。投递在<strong>后台复制的搜索页</strong>点申请。</div>
     <div class="info" id="wFetchInfo"></div>
@@ -330,6 +481,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
       <label>间隔</label><input id="wMin" type="number" value="3" min="2"><label>~</label><input id="wMax" type="number" value="5" min="3"><label>秒</label>
     </div>
     <button class="btn w51 start" id="wStart">🚀 开始批量投递</button>
+    <div class="hint" id="applyHintW51"></div>
     <div class="prog" id="wProg">
       <div class="bar"><div class="fill" id="wPfill"></div></div>
       <div style="display:flex;justify-content:space-between;margin-top:2px">
@@ -344,7 +496,7 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
   <button id="bCancel" style="display:none;color:#f87171;border-color:#f87171">⏹ 取消</button>
   <button class="clear-log">🗑 清除日志</button>
 </div>
-<div id="log" style="background:#0f0f23;border-radius:8px;padding:8px;margin-top:8px;max-height:min(280px,32vh);overflow-y:auto;font-family:monospace;font-size:10px;line-height:1.6;color:#888"></div>
+<div id="log"></div>
 <script src="resume-match.js"></script>
 <script src="resume-ai.js"></script>
 <script src="popup.js"></script>

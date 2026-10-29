@@ -402,6 +402,8 @@ async function w51Batch(jobs, tabId, minInt, maxInt, searchUrlHint) {
 
       if (j.resumeFlow) {
         log('[' + idx + '] ⏭ ' + j.name + ' | 简历投递(匹配已过滤)', '#fbbf24');
+        // 记入去重，别让它一直占着待投位置被反复重试
+        await rememberApplied('w51', jobId);
         progress.idx = idx; progress.currentName = j.name;
         progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
         makeProgress('w51', progress);
@@ -435,6 +437,8 @@ async function w51Batch(jobs, tabId, minInt, maxInt, searchUrlHint) {
         const skip = /简历投递|页面跳转/.test(result.msg || '');
         if (skip) {
           log('[' + idx + '] ⏭ ' + j.name + ' | ' + (result.msg || '已跳过'), '#fbbf24');
+          // 跳过也记入去重：否则这类岗永远留在待投里，每次点投递都白跑一遍
+          await rememberApplied('w51', jobId);
         } else {
           failC++;
           log('[' + idx + '] ❌ ' + (result.msg || '投递失败'), '#f87171');

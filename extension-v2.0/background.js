@@ -31,6 +31,39 @@ async function rememberApplied(platform, id) {
   } catch (_) {}
 }
 
+// 逐条结果标记：只存活在 _progress 里，跟着本轮 batch 一起被下一轮覆盖。
+// 侧边栏拿它区分「已投 / 已沟通 / 跳过 / 失败」——已投名单里这四种可能都记了 id，
+// 光看名单分不出谁失败了。
+const MARK_CAP = 500;
+
+function markJob(progress, id, s, msg) {
+  id = String(id || '').trim();
+  if (!id) return;
+  const marks = progress.marks || (progress.marks = {});
+  marks[id] = { s, m: String(msg || '').slice(0, 80), t: Date.now() };
+  const ks = Object.keys(marks);
+  // 超过上限先丢最早的：正常批量远小于这个数，只有反复重投才会撞上
+  if (ks.length > MARK_CAP) delete marks[ks[0]];
+}
+
+// batchIds 与 marks 同存 progress：下标与 jobs 一一对齐（取不到 id 的位置留空串），
+// 侧边栏靠 progress.idx 反查「当前正在投哪一条」。
+function batchIdOf(platform, job) {
+  const j = job || {};
+  if (platform === 'boss') {
+    return String(j.encryptId || (j.url || '').match(/job_detail\/([a-zA-Z0-9_-]+)/)?.[1] || '').trim();
+  }
+  if (platform === 'zp') {
+    return String(j.jobId || (j.url || '').match(/jobdetail\/([a-zA-Z0-9]+)/)?.[1] || '').trim();
+  }
+  return String(j.jobId || (j.url || '').match(/(?:jobId=|\/)(\d{6,})/)?.[1] || '').trim();
+}
+
+function initMarks(progress, platform, jobs) {
+  progress.batchIds = [].concat(jobs || []).map((j) => batchIdOf(platform, j));
+  progress.marks = {};
+}
+
 // 侧边栏按本地日期取 key，这里必须一致（不能用 toISOString 的 UTC 日期）
 function todayKey() {
   const d = new Date();
@@ -51,6 +84,7 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
   let okC = 0, dupC = 0, failC = 0;
   const log = (m, c) => addLog('boss', progress.logs, new Date().toLocaleTimeString('zh-CN', { hour12: false }), m, c);
 
+  initMarks(progress, 'boss', jobs);
   log('=== 开始 ' + jobs.length + ' 个 ===', '#8b949e');
 
   for (let i = 0; i < jobs.length; i++) {
@@ -77,22 +111,25 @@ async function bossBatch(jobs, cookieStr, minInt, maxInt) {
     await chrome.storage.local.set({ cmd: cmdData });
 
     const result = await waitStorage('result', cmdId, 15000);
-    if (!result) { failC++; log('[' + idx + '] ❌ 超时', '#f87171'); }
+    if (!result) { failC++; log('[' + idx + '] ❌ 超时', '#f87171'); markJob(progress, encryptId, 'fail', '超时'); }
     else if (result.dup) {
       // 平台提示已沟通：记入名单防重试，不计入今日已投
       dupC++;
       log('[' + idx + '] 🔁 ' + j.name + ' | 已沟通过，跳过', '#fbbf24');
       await rememberApplied('boss', encryptId);
+      markJob(progress, encryptId, 'dup', result.msg || '已沟通过');
     }
     else if (result.ok) {
       okC++;
       log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已发送'), '#4ade80');
       await rememberApplied('boss', encryptId);
       await bumpDayCount('boss');
+      markJob(progress, encryptId, 'ok', result.msg || '已发送');
     }
     else {
       failC++;
       log('[' + idx + '] ❌ ' + result.msg, '#f87171');
+      markJob(progress, encryptId, 'fail', result.msg || '投递失败');
       if (result.msg && (result.msg.includes('请稍候') || result.msg.includes('hasCaptcha=true'))) {
         log('⚠️ BOSS 风控，已停止', '#f87171');
         break;
@@ -131,6 +168,7 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
   let okC = 0, dupC = 0, failC = 0;
   const log = (m, c) => addLog('zp', progress.logs, new Date().toLocaleTimeString('zh-CN', { hour12: false }), m, c);
 
+  initMarks(progress, 'zp', jobs);
   log('=== 智联开始 ' + jobs.length + ' 个 ===', '#8b949e');
 
   for (let i = 0; i < jobs.length; i++) {
@@ -158,20 +196,26 @@ async function zpBatch(jobs, cookieStr, at, rt, resumeNumber, cityIds, staffId, 
 
     // 内容脚本 25s 才判超时，这里必须更久，否则真实投递会被判失败
     const result = await waitStorage('zresult', cmdId, 30000);
-    if (!result) { failC++; log('[' + idx + '] ❌ 超时', '#f87171'); }
+    if (!result) { failC++; log('[' + idx + '] ❌ 超时', '#f87171'); markJob(progress, jobNumber, 'fail', '超时'); }
     else if (result.dup) {
       // 平台说重复投递：记入本机名单避免下一轮重试，但不计入今日已投
       dupC++;
       log('[' + idx + '] 🔁 ' + j.name + ' | 已投过，跳过', '#fbbf24');
       await rememberApplied('zp', jobNumber);
+      markJob(progress, jobNumber, 'dup', result.msg || '已投过');
     }
     else if (result.ok) {
       okC++;
       log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已投递'), '#4ade80');
       await rememberApplied('zp', jobNumber);
       await bumpDayCount('zp');
+      markJob(progress, jobNumber, 'ok', result.msg || '已投递');
     }
-    else { failC++; log('[' + idx + '] ❌ ' + result.msg, '#f87171'); }
+    else {
+      failC++;
+      log('[' + idx + '] ❌ ' + result.msg, '#f87171');
+      markJob(progress, jobNumber, 'fail', result.msg || '投递失败');
+    }
 
     progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
     makeProgress('zp', progress);
@@ -341,6 +385,8 @@ async function w51Batch(jobs, tabId, minInt, maxInt, searchUrlHint) {
   let okC = 0, dupC = 0, failC = 0;
   const log = (m, c) => addLog('w51', progress.logs, new Date().toLocaleTimeString('zh-CN', { hour12: false }), m, c);
 
+  initMarks(progress, 'w51', jobs);
+
   if (!tabId) {
     log('❌ 请打开已登录的 we.51job.com 搜索页', '#f87171');
     progress.running = false;
@@ -404,7 +450,10 @@ async function w51Batch(jobs, tabId, minInt, maxInt, searchUrlHint) {
         log('[' + idx + '] ⏭ ' + j.name + ' | 简历投递(匹配已过滤)', '#fbbf24');
         // 记入去重，别让它一直占着待投位置被反复重试
         await rememberApplied('w51', jobId);
+        markJob(progress, jobId, 'skip', '简历投递(匹配已过滤)');
         progress.idx = idx; progress.currentName = j.name;
+        // 状态别停在上一轮的「投递中...」：否则侧边栏会把这条已跳过的岗显示成正在投
+        progress.status = '跳过中...';
         progress.okC = okC; progress.dupC = dupC; progress.failC = failC;
         makeProgress('w51', progress);
         continue;
@@ -428,20 +477,24 @@ async function w51Batch(jobs, tabId, minInt, maxInt, searchUrlHint) {
         dupC++;
         log('[' + idx + '] 🔁 ' + j.name + ' | 已投过，跳过', '#fbbf24');
         await rememberApplied('w51', jobId);
+        markJob(progress, jobId, 'dup', result.msg || '已投过');
       } else if (result.ok) {
         okC++;
         log('[' + idx + '] ✅ ' + j.name + ' | ' + (result.msg || '已投递'), '#4ade80');
         await rememberApplied('w51', jobId);
         await bumpDayCount('w51');
+        markJob(progress, jobId, 'ok', result.msg || '已投递');
       } else {
         const skip = /简历投递|页面跳转/.test(result.msg || '');
         if (skip) {
           log('[' + idx + '] ⏭ ' + j.name + ' | ' + (result.msg || '已跳过'), '#fbbf24');
           // 跳过也记入去重：否则这类岗永远留在待投里，每次点投递都白跑一遍
           await rememberApplied('w51', jobId);
+          markJob(progress, jobId, 'skip', result.msg || '已跳过');
         } else {
           failC++;
           log('[' + idx + '] ❌ ' + (result.msg || '投递失败'), '#f87171');
+          markJob(progress, jobId, 'fail', result.msg || '投递失败');
         }
       }
 

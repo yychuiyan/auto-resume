@@ -99,10 +99,29 @@ async function clearAppliedIds(platform) {
     : [key];
   await chrome.storage.local.remove(keys);
   appliedCache[platform] = new Set();
+  await resetMarks(platform);
   await refreshDayCounts();
   await refreshApplyGuard(platform);
   const label = ({ boss: 'BOSS', zp: '智联', w51: '前程' })[platform] || platform;
   info(label + (platform === 'w51' ? ' 本机已投与已匹配记录已清空' : ' 本机已投名单已清空'));
+}
+
+// 清掉本轮逐条结果：清空名单 / 重新匹配后，上一轮的「已投 / 失败」不该再挂在列表上。
+// 内存和 storage 里的 progress.marks 一起清，否则下一次 poll 又把旧标记读回来。
+async function resetMarks(platform) {
+  marksCache[platform] = {};
+  curIdCache[platform] = '';
+  const key = platform + '_progress';
+  try {
+    const s = await chrome.storage.local.get(key);
+    const p = s[key];
+    if (p && (p.marks || p.batchIds)) {
+      p.marks = {};
+      p.batchIds = [];
+      await chrome.storage.local.set({ [key]: p });
+    }
+  } catch (_) {}
+  repaintStatuses(platform);
 }
 
 function escHtml(s) {
@@ -959,15 +978,60 @@ function fillProfileEditor(p) {
   }
 }
 
-function setResumeFold(open) {
+// 折叠状态统一走 applyXxx（只改 DOM），落库只发生在用户点击时。
+// 原因：以前初始化也会写一次 storage，面板被 Chrome 预建/重开时容易把用户刚选的状态冲掉；
+// 而且多个面板实例（不同 tab 的侧栏）之间没有同步，切到智联还是旧的样子。
+function refitProfileTextareas() {
+  for (const id of ['pfSkills', 'pfWork']) {
+    const el = document.getElementById(id);
+    if (el) { delete el.dataset.manual; fitTextarea(el); }
+  }
+}
+
+function applyResumeFold(open) {
   const card = document.getElementById('resumeCard');
-  const caret = document.getElementById('resumeFoldCaret');
   if (!card) return;
+  const wasOpen = !card.classList.contains('collapsed');
   card.classList.toggle('collapsed', !open);
   // 日志高度跟着收起状态走（CSS 里 body.resume-collapsed #log）
   document.body.classList.toggle('resume-collapsed', !open);
+  const caret = document.getElementById('resumeFoldCaret');
   if (caret) caret.textContent = open ? '收起' : '展开';
+  // 收起时正文不占位，量不到高度；刚展开要按内容重新撑一次
+  if (open && !wasOpen) refitProfileTextareas();
+}
+
+// 用户点击走这里：改 DOM + 落库，别的标签页侧栏和下次打开都跟着变
+function setResumeFold(open) {
+  applyResumeFold(open);
   chrome.storage.local.set({ ui_resume_open: !!open });
+}
+
+function applyApiOpen(open) {
+  const panel = document.getElementById('apiPanel');
+  if (!panel) return;
+  panel.classList.toggle('open', !!open);
+}
+
+function setApiOpen(open) {
+  applyApiOpen(open);
+  chrome.storage.local.set({ ui_api_open: !!open });
+}
+
+// 恢复折叠状态：读不到就默认展开（老版本没有这个键）
+async function restoreFoldStates() {
+  let s = {};
+  try { s = await chrome.storage.local.get(['ui_resume_open', 'ui_api_open']); } catch (_) {}
+  applyResumeFold(s.ui_resume_open !== false);
+  applyApiOpen(s.ui_api_open === true);
+}
+
+// 别的侧栏实例（另一个 tab 的面板）改了折叠状态就跟着变，切过去不用重新点一次。
+// 本窗口自己点的时候状态已经一致，这里只是幂等地再应用一次。
+function syncFoldFromChange(changes) {
+  if (!changes) return;
+  if (changes.ui_resume_open) applyResumeFold(changes.ui_resume_open.newValue !== false);
+  if (changes.ui_api_open) applyApiOpen(changes.ui_api_open.newValue === true);
 }
 
 function renderResumeFoldSum(text) {
@@ -1063,6 +1127,8 @@ function resetMatchResults() {
   renderBossList([]);
   renderZpList([]);
   renderW51List([]);
+  // 列表已经清空，上一轮的逐条结果也一并作废（重新上传简历时不该还挂着「已投」）
+  for (const p of PLATFORMS) { resetMarks(p).catch(() => {}); }
 }
 
 async function deleteResumeFile() {
@@ -1564,6 +1630,120 @@ function pendingJobs(platform) {
   });
 }
 
+// ---- 逐条投递状态 ----------------------------------------------------------
+// marks / batchIds 来自 background 写进 <平台>_progress 的本轮结果：
+//   marks[id] = { s: 'ok'|'dup'|'skip'|'fail', m: 说明 }
+//   batchIds[i] = 第 i 条岗位的 id（取不到 id 的位置是空串）
+// 已投名单里 ok / dup / skip 都记了 id，光看名单分不出谁失败了，所以必须靠 marks。
+const marksCache = { boss: {}, zp: {}, w51: {} };
+const curIdCache = { boss: '', zp: '', w51: '' };
+
+// 已投 / 已沟通 / 跳过 / 投递中：这些岗位已经或正在走投递流程，忽略按钮没有意义
+// （已投的本就会被投递和下一轮匹配同时排除），所以不渲染按钮，只留等宽占位。
+const LOCKED_STATUS = { ok: 1, dup: 1, skip: 1, run: 1 };
+
+function statusOf(platform, job) {
+  const id = jobIdOf(job);
+  const m = id ? marksCache[platform][id] : null;
+  // 投递中放在最前：正在投的那条即使上一轮记过 fail 也要显示进行中
+  if (id && curIdCache[platform] === id) return { s: 'run', label: '投递中', title: '正在投递' };
+  if (m && m.s === 'ok') return { s: 'ok', label: '已投递', title: m.m || '已投递' };
+  if (m && m.s === 'dup') return { s: 'dup', label: '已沟通', title: m.m || '平台提示已沟通过' };
+  // 名单兜底：换窗口打开 / 上一轮投的，没有本轮标记但名单里有
+  if (id && appliedCache[platform].has(id)) return { s: 'ok', label: '已投递', title: '本机已投名单' };
+  if (id && ignoredCache[platform].has(id)) return { s: 'ign', label: '已忽略', title: '本轮及后续匹配都跳过' };
+  if (m && m.s === 'skip') return { s: 'skip', label: '已跳过', title: m.m || '已跳过' };
+  if (m && m.s === 'fail') return { s: 'fail', label: '失败', title: m.m || '投递失败' };
+  return { s: 'todo', label: '待投递', title: '等待投递' };
+}
+
+function lockStatus(s) { return !!LOCKED_STATUS[s]; }
+
+function statusHtml(st) {
+  return `<span class="jstat st-${st.s}" title="${escHtml(st.title || st.label)}">${st.label}</span>`;
+}
+
+// 忽略槽位：可点就给按钮，不可点就给等宽占位（保住右侧分数列的位置）
+// 已忽略的行永远留「恢复」——哪怕它同时在已投名单里（历史重叠），也要能撤销
+function ignoreSlotHtml(platform, idx, jid, st, ignored) {
+  if (!jid) return '<span class="jignpad" aria-hidden="true"></span>';
+  if (lockStatus(st.s) && !ignored) return '<span class="jignpad" aria-hidden="true"></span>';
+  const title = ignored ? '恢复：重新参与投递' : '忽略：本轮及后续匹配都跳过';
+  return `<button type="button" class="jignore${ignored ? ' on' : ''}" data-ign="${idx}" title="${title}">${ignored ? '恢复' : '忽略'}</button>`;
+}
+
+// 把本轮 progress 里的标记同步进缓存，并算出「当前正在投哪一条」
+function applyProgressMarks(platform, p) {
+  if (!p) return false;
+  const prevMarks = marksCache[platform];
+  const nextMarks = (p.marks && typeof p.marks === 'object') ? p.marks : {};
+  const nextBatch = Array.isArray(p.batchIds) ? p.batchIds : [];
+  // 等待间隔时 status 是「等 Ns...」，此时 idx 还指着上一条，不能算投递中
+  let cur = '';
+  if (p.running && p.status === '投递中...' && p.idx > 0) {
+    cur = String(nextBatch[p.idx - 1] || '');
+  }
+  const prevCur = curIdCache[platform];
+  const changed = prevCur !== cur || !sameMarkSet(prevMarks, nextMarks);
+  marksCache[platform] = nextMarks;
+  curIdCache[platform] = cur;
+  return changed;
+}
+
+function sameMarkSet(a, b) {
+  const ka = Object.keys(a || {}), kb = Object.keys(b || {});
+  if (ka.length !== kb.length) return false;
+  for (const k of kb) {
+    const x = a && a[k], y = b[k];
+    if (!x || x.s !== y.s || x.t !== y.t) return false;
+  }
+  return true;
+}
+
+// 只换某一行的状态列（和忽略槽位），不整表重渲染
+function paintStatusRow(platform, idx) {
+  const jl = jobListEl(platform);
+  if (!jl) return;
+  const row = jl.querySelector('.jrow[data-idx="' + idx + '"]');
+  if (!row) return;
+  const job = jobsOf(platform)[idx];
+  if (!job) return;
+  const st = statusOf(platform, job);
+  const el = row.querySelector('.jstat');
+  const jid = jobIdOf(job);
+  const ignored = !!jid && ignoredCache[platform].has(jid);
+  const locked = lockStatus(st.s) && !ignored;
+  if (el) {
+    if (el.className !== 'jstat st-' + st.s) el.className = 'jstat st-' + st.s;
+    if (el.textContent !== st.label) el.textContent = st.label;
+    const title = st.title || st.label;
+    if (el.title !== title) el.title = title;
+  }
+  row.classList.toggle('applied', st.s === 'ok' || st.s === 'dup');
+  row.classList.toggle('failed', st.s === 'fail');
+  // 忽略槽位：已投类状态换成等宽占位；其余状态按 ignored 同步成「忽略 / 恢复」
+  const slot = row.querySelector('.jignore') || row.querySelector('.jignpad');
+  if (!slot) return;
+  const isBtn = slot.classList.contains('jignore');
+  if (locked) {
+    if (isBtn) slot.outerHTML = '<span class="jignpad" aria-hidden="true"></span>';
+    return;
+  }
+  if (!jid) return;
+  if (!isBtn) { slot.outerHTML = ignoreSlotHtml(platform, idx, jid, st, ignored); return; }
+  const want = ignored ? '恢复' : '忽略';
+  if (slot.textContent !== want) slot.textContent = want;
+  slot.classList.toggle('on', ignored);
+  const title = ignored ? '恢复：重新参与投递' : '忽略：本轮及后续匹配都跳过';
+  if (slot.title !== title) slot.title = title;
+}
+
+// 整表里所有行的状态都重刷一遍（数量少的场景用，比如跨窗口同步）
+function repaintStatuses(platform) {
+  const n = jobsOf(platform).length;
+  for (let i = 0; i < n; i++) paintStatusRow(platform, i);
+}
+
 function reRenderJobList(platform) {
   const jobs = jobsOf(platform);
   if (platform === 'boss') renderBossList(jobs);
@@ -1573,11 +1753,13 @@ function reRenderJobList(platform) {
 
 // 守卫用的统计：按「已投优先于忽略」的口径互斥计数（重叠的岗只算已投），
 // 缺 id 的脏数据单独计，避免把 pending 数算错。
+// failN 只统计「本轮失败且仍待投」的：已投 / 已忽略 的失败不算，否则文案会自相矛盾。
 function guardStatsOf(platform) {
   const list = jobsOf(platform);
   const applied = appliedCache[platform];
   const ignored = ignoredCache[platform];
-  let appliedN = 0, ignoredN = 0, missing = 0;
+  const marks = marksCache[platform];
+  let appliedN = 0, ignoredN = 0, missing = 0, failN = 0;
   let allApplied = list.length > 0, allIgnored = list.length > 0;
   for (const j of list) {
     const id = jobIdOf(j);
@@ -1587,8 +1769,10 @@ function guardStatsOf(platform) {
     }
     if (applied.has(id)) appliedN++; else allApplied = false;
     if (ignored.has(id)) ignoredN++; else allIgnored = false;
+    const m = marks[id];
+    if (m && m.s === 'fail' && !applied.has(id) && !ignored.has(id)) failN++;
   }
-  return { list, appliedN, ignoredN, missing, allApplied, allIgnored, total: list.length };
+  return { list, appliedN, ignoredN, missing, failN, allApplied, allIgnored, total: list.length };
 }
 
 // 一条也说不出「还能投什么」时的原因文案（按钮提示与硬拦截共用）
@@ -1603,6 +1787,7 @@ function blockedReasonText(platform, stats) {
   }
   const parts = [];
   if (s.appliedN) parts.push('已投 ' + s.appliedN);
+  if (s.failN) parts.push('失败 ' + s.failN);
   if (s.ignoredN) parts.push('忽略 ' + s.ignoredN);
   if (s.missing) parts.push('缺 id ' + s.missing);
   // 只有缺 id：不是投递/忽略导致的，直接说清无法投递，别让用户以为被名单挡了
@@ -1648,6 +1833,7 @@ async function refreshApplyGuard(platform) {
   if (hintEl) {
     const parts = [];
     if (stats.appliedN) parts.push('已投 ' + stats.appliedN);
+    if (stats.failN) parts.push('失败 ' + stats.failN);
     if (stats.ignoredN) parts.push('忽略 ' + stats.ignoredN);
     if (stats.missing) parts.push('缺 id ' + stats.missing);
     hintEl.textContent = `待投 ${pending.length}/${list.length} 条`
@@ -1687,13 +1873,15 @@ function renderJobList(platform, jobs, accent, showSub) {
     const sub = showSub && !!(j.company || j.info);
     const jid = jobIdOf(j);
     const ignored = !!jid && ignoredCache[platform].has(jid);
-    return `<div class="jrow${ignored ? ' ignored' : ''}" data-idx="${i}" style="animation-delay:${delay}ms">`
+    const st = statusOf(platform, j);
+    return `<div class="jrow${ignored ? ' ignored' : ''}${st.s === 'fail' ? ' failed' : ''}${st.s === 'ok' || st.s === 'dup' ? ' applied' : ''}" data-idx="${i}" style="animation-delay:${delay}ms">`
       + `<span class="jidx" style="color:${accent}">${i + 1}.</span>`
       + `<div class="jmain">`
       + `<div class="jname" title="${escHtml(j.name)}">${escHtml(j.name)}</div>`
       + (sub ? `<div class="jsub">${escHtml(j.company || '')} ${escHtml(j.info || '')}</div>` : '')
       + `</div>`
-      + (jid ? `<button type="button" class="jignore${ignored ? ' on' : ''}" data-ign="${i}" title="${ignored ? '恢复：重新参与投递' : '忽略：本轮及后续匹配都跳过'}">${ignored ? '恢复' : '忽略'}</button>` : '')
+      + ignoreSlotHtml(platform, i, jid, st, ignored)
+      + statusHtml(st)
       + (j.score != null ? `<span class="jscore">${j.score}</span>` : '')
       + '</div>';
   }).join('');
@@ -1741,6 +1929,13 @@ async function toggleIgnoreJob(platform, idx) {
   if (!job) return;
   const jid = jobIdOf(job);
   if (!jid) { err('这条岗位没有可用 id，无法忽略'); return; }
+  // 已投 / 已沟通 / 跳过 的岗位已进去重名单，忽略它没有任何效果；事件委托万一
+  // 拿到旧节点也要挡住，别写出一条无意义的忽略记录。已忽略的仍允许「恢复」。
+  const st = statusOf(platform, job);
+  if (lockStatus(st.s) && !ignoredCache[platform].has(jid)) {
+    err('这条岗位已投递（' + st.label + '），无需忽略');
+    return;
+  }
   const set = ignoredCache[platform];
   const willIgnore = !set.has(jid);
   if (willIgnore) set.add(jid); else set.delete(jid);
@@ -1779,6 +1974,9 @@ function clearMatchResult(platform) {
   if (hintEl) hintEl.textContent = '';
   const startBtn = document.getElementById({ boss: 'btnStart', zp: 'zStart', w51: 'wStart' }[platform]);
   if (startBtn) startBtn.disabled = true;
+
+  // 新一轮匹配开始，上一轮的逐条结果作废（否则同一个岗位又出现时会带着旧的「已投/失败」）
+  resetMarks(platform);
 
   const jl = jobListEl(platform);
   if (!jl) return;
@@ -1955,6 +2153,8 @@ function pollProgress(platform) {
     const p = s[key];
     if (!p) return;
     if (p.logs) mergeProgressLogs(platform, p.logs);
+    // 先同步本轮逐条结果，列表状态列跟着进度一起走
+    if (applyProgressMarks(platform, p)) repaintStatuses(platform);
     refreshDayCounts();
     if (platform === 'boss') {
       document.getElementById('ptxt').textContent = `进度 ${p.idx}/${p.total}${progCountText(p)}`;
@@ -1964,7 +2164,7 @@ function pollProgress(platform) {
         clearInterval(timer); isRunning = false;
         document.getElementById('btnStart').disabled = false; hideCancel();
         // 投递结束后按最新 applied 名单重算守卫：全投完这里会把按钮置灰并说明原因
-        loadGuardSets('boss').then(() => refreshApplyGuard('boss'));
+        loadGuardSets('boss').then(() => { repaintStatuses('boss'); return refreshApplyGuard('boss'); });
       }
     } else if (platform === 'zp') {
       document.getElementById('zPtxt').textContent = `进度 ${p.idx}/${p.total}${progCountText(p)}`;
@@ -1973,7 +2173,7 @@ function pollProgress(platform) {
       if (!p.running) {
         clearInterval(timer); zIsRunning = false;
         document.getElementById('zStart').disabled = false; hideCancel();
-        loadGuardSets('zp').then(() => refreshApplyGuard('zp'));
+        loadGuardSets('zp').then(() => { repaintStatuses('zp'); return refreshApplyGuard('zp'); });
       }
     } else {
       document.getElementById('wPtxt').textContent = `进度 ${p.idx}/${p.total}${progCountText(p)}`;
@@ -1982,7 +2182,7 @@ function pollProgress(platform) {
       if (!p.running) {
         clearInterval(timer); wIsRunning = false;
         document.getElementById('wStart').disabled = false; hideCancel();
-        loadGuardSets('w51').then(() => refreshApplyGuard('w51'));
+        loadGuardSets('w51').then(() => { repaintStatuses('w51'); return refreshApplyGuard('w51'); });
       }
     }
   }, 500);
@@ -2347,6 +2547,9 @@ async function startW51Batch() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // 折叠状态最先恢复：只做一次 storage 读，别等到后面一串 await 都跑完才收起，
+  // 否则面板一打开会先闪一下展开态
+  await restoreFoldStates();
   bindMselOutsideClick();
   bindDegreePicker();
   bindDirectionPicker();
@@ -2366,9 +2569,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadApiSettings();
   await renderResumeInfo();
   await refreshDayCounts();
-  const foldSaved = await chrome.storage.local.get('ui_resume_open');
-  if (foldSaved.ui_resume_open === false) setResumeFold(false);
-  else setResumeFold(true);
   await restoreSaveFlashes();
   const s = await chrome.storage.local.get(['minInt', 'maxInt']);
   document.getElementById('min').value = s.minInt || 3;
@@ -2383,22 +2583,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   else await followActiveSite();
 
   const bossProg = await chrome.storage.local.get('boss_progress');
-  if (bossProg.boss_progress && bossProg.boss_progress.running) {
-    isRunning = true; document.getElementById('btnStart').disabled = true;
-    document.getElementById('prog').style.display = ''; document.getElementById('cfg').style.display = '';
-    showCancel(); pollProgress('boss');
+  if (bossProg.boss_progress) {
+    // 不管在不在跑，先把本轮逐条结果吃进来：重开面板/第二个侧边栏也能看到状态
+    applyProgressMarks('boss', bossProg.boss_progress);
+    if (bossProg.boss_progress.running) {
+      isRunning = true; document.getElementById('btnStart').disabled = true;
+      document.getElementById('prog').style.display = ''; document.getElementById('cfg').style.display = '';
+      showCancel(); pollProgress('boss');
+    }
   }
   const zpProg = await chrome.storage.local.get('zp_progress');
-  if (zpProg.zp_progress && zpProg.zp_progress.running) {
-    zIsRunning = true; document.getElementById('zStart').disabled = true;
-    document.getElementById('zProg').style.display = ''; document.getElementById('zCfg').style.display = '';
-    showCancel(); pollProgress('zp');
+  if (zpProg.zp_progress) {
+    applyProgressMarks('zp', zpProg.zp_progress);
+    if (zpProg.zp_progress.running) {
+      zIsRunning = true; document.getElementById('zStart').disabled = true;
+      document.getElementById('zProg').style.display = ''; document.getElementById('zCfg').style.display = '';
+      showCancel(); pollProgress('zp');
+    }
   }
   const wProg = await chrome.storage.local.get('w51_progress');
-  if (wProg.w51_progress && wProg.w51_progress.running) {
-    wIsRunning = true; document.getElementById('wStart').disabled = true;
-    document.getElementById('wProg').style.display = ''; document.getElementById('wCfg').style.display = '';
-    showCancel(); pollProgress('w51');
+  if (wProg.w51_progress) {
+    applyProgressMarks('w51', wProg.w51_progress);
+    if (wProg.w51_progress.running) {
+      wIsRunning = true; document.getElementById('wStart').disabled = true;
+      document.getElementById('wProg').style.display = ''; document.getElementById('wCfg').style.display = '';
+      showCancel(); pollProgress('w51');
+    }
   }
   // 初次加载：把守卫状态算一遍（没匹配结果时按钮本就是灰的/隐藏的）
   for (const p of PLATFORMS) refreshApplyGuard(p);
@@ -2408,14 +2618,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('tab51').addEventListener('click', () => switchTab('51job'));
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    // 折叠状态：另一个 tab 的侧栏改了也跟着变（切到智联不用重新点一次）
+    syncFoldFromChange(changes);
     const dayChanged = !!(changes[dayCountKey('boss')] || changes[dayCountKey('zp')] || changes[dayCountKey('w51')]);
     const appliedChanged = !!(changes.applied_ids_boss || changes.applied_ids_zp || changes.applied_ids_w51
       || changes.w51_matched_ids);
     const ignoredChanged = !!(changes.ignored_ids_boss || changes.ignored_ids_zp || changes.ignored_ids_w51);
+    // 另一个侧边栏实例在投递时，progress 一变就把状态列同步过来（不用等它 poll）
+    const progChanged = PLATFORMS.filter((p) => changes[p + '_progress']);
+    if (progChanged.length) {
+      for (const p of progChanged) {
+        const np = changes[p + '_progress'].newValue;
+        if (!np) continue;
+        if (applyProgressMarks(p, np)) repaintStatuses(p);
+      }
+    }
     if (!dayChanged && !appliedChanged && !ignoredChanged) return;
 
     // 只有「别处改的」忽略名单才需要重画列表：本窗口自己点忽略时缓存已是最新，
-    // 重画反而会让整行入场动画重播。已投名单在投递中会被频繁写入，也只重算守卫。
+    // 重画反而会让整行入场动画重播。已投名单在投递中会被频繁写入，只刷状态列与守卫
+    // （状态列必须刷，否则已投的那一行还会挂着「忽略」按钮）。
     const repaint = [];
     for (const p of PLATFORMS) {
       const ch = changes['ignored_ids_' + p];
@@ -2427,11 +2649,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     Promise.resolve(refreshDayCounts()).then(() => {
       for (const p of repaint) reRenderJobList(p);
-      for (const p of PLATFORMS) refreshApplyGuard(p);
+      for (const p of PLATFORMS) {
+        repaintStatuses(p);
+        refreshApplyGuard(p);
+      }
     });
   });
   document.getElementById('btnApi').addEventListener('click', () => {
-    document.getElementById('apiPanel').classList.toggle('open');
+    const panel = document.getElementById('apiPanel');
+    setApiOpen(!(panel && panel.classList.contains('open')));
   });
   document.getElementById('btnSaveApi').addEventListener('click', saveApiSettings);
   document.getElementById('btnSaveProfile').addEventListener('click', saveProfileEdits);
@@ -2444,15 +2670,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindIgnoreButtons();
   document.getElementById('btnToggleResume').addEventListener('click', () => {
     const card = document.getElementById('resumeCard');
-    const open = card && card.classList.contains('collapsed');
-    setResumeFold(!!open);
-    // 折叠状态下量不到内容高度，展开后重新撑一次
-    if (open) {
-      for (const id of ['pfSkills', 'pfWork']) {
-        const el = document.getElementById(id);
-        if (el) { delete el.dataset.manual; fitTextarea(el); }
-      }
-    }
+    // 当前是收起状态，点一下就是要展开
+    const collapsed = card && card.classList.contains('collapsed');
+    setResumeFold(!!collapsed);
   });
   document.getElementById('btnUploadResume').addEventListener('click', () => {
     document.getElementById('resumeFile').click();

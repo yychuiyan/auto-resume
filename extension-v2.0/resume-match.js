@@ -310,6 +310,27 @@ window.ResumeMatch = (() => {
 
   // 命中返回命中的那个词（日志直接用），没命中返回空串。
   // 文本范围包含 JD：拦得更彻底，代价是 JD 顺带提一句也会被拦。
+  //
+  // 纯拉丁词要求两侧不在字母数字里，否则短词会隔着单词内部误命中：
+  // 「LIN」会把 online / deadline / Linux 全拦下，「CAD」会命中 cascade。
+  // 中文词仍按子串处理（中文没有词边界，「车载」出现在句子里就该算命中）。
+  const kwReCache = new Map();
+  function excludeMatcher(word) {
+    const k = String(word || '').toLowerCase();
+    if (!k) return null;
+    if (kwReCache.has(k)) return kwReCache.get(k);
+    const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let re;
+    if (/[a-z]/.test(k) && /^[a-z0-9+#.\-_]+$/.test(k)) {
+      // 「LIN总线」这种后面紧跟中文的情况也算命中：中文不是 [a-z0-9]
+      re = new RegExp('(^|[^a-z0-9])' + esc + '($|[^a-z0-9])');
+    } else {
+      re = new RegExp(esc);
+    }
+    kwReCache.set(k, re);
+    return re;
+  }
+
   function keywordDenyHit(job, profile) {
     const words = excludeKeywordsOf(profile);
     if (!words.length) return '';
@@ -319,8 +340,8 @@ window.ResumeMatch = (() => {
       .join(' ').toLowerCase();
     if (!blob.trim()) return '';
     for (const w of words) {
-      const k = String(w).toLowerCase();
-      if (k && blob.includes(k)) return w;
+      const re = excludeMatcher(w);
+      if (re && re.test(blob)) return w;
     }
     return '';
   }
@@ -994,8 +1015,11 @@ window.ResumeMatch = (() => {
       // 精排拿到 JD 后方向判定更准，这里必须二次校验
       || (dinfo.blocked ? (dinfo.reason === 'exclude' ? 'exclude' : 'direction') : '');
     if (block) {
-      // 记下否决原因：精排 0 条回退时要把这些岗位剔掉，不能让它们绕过硬规则
+      // 记下否决原因：精排 0 条回退时要把这些岗位剔掉，不能让它们绕过硬规则。
+      // refineKw / refineDir 只为了 0 条时能汇总「是谁拦的」。
       job.refineWhy = block;
+      if (block === 'exclude' && dinfo.kw) job.refineKw = dinfo.kw;
+      if (block === 'direction' && dinfo.got) job.refineDir = dinfo.got;
       log('精排淘汰(' + whyLabel(block) + ') ' + job.name + (job.company ? ' | ' + job.company : '')
         + (block === 'direction' && dinfo.got ? ' → 判成「' + dinfo.got + '」，没勾它' : '')
         + (block === 'exclude' && dinfo.kw ? ' → 命中排除词「' + dinfo.kw + '」' : ''));
@@ -1028,6 +1052,78 @@ window.ResumeMatch = (() => {
     const list = [].concat(refineTop || []);
     const kept = list.filter(j => !j.refineWhy);
     return { kept, dropped: list.length - kept.length };
+  }
+
+  // 精排总分批：默认只判粗筛前 REFINE_MAX 条，但**这一批全被否决**时继续判下一批。
+  // 否则前 20 条恰好都命中同一个排除词，后面明明干净的岗位就一起被埋了，直接归零。
+  // 硬规则不变：已否决的岗位绝不放回，只是把「还没判过的」也判一遍。
+  const REFINE_ROUNDS = 3;
+
+  async function refineInRounds(passed, profile, log, refineFn) {
+    const out = { jobs: [], stopped: false, judged: [], rounds: 0 };
+    let consumed = 0;
+    for (let round = 1; round <= REFINE_ROUNDS; round++) {
+      const batch = passed.slice(consumed, consumed + REFINE_MAX);
+      if (!batch.length) break;
+      if (round > 1) {
+        log('前 ' + (round - 1) + ' 批精排都没出结果，继续判下一批 ' + batch.length + ' 条');
+      }
+      consumed += batch.length;
+      out.rounds = round;
+      const r = await refineFn(batch, profile, log, {
+        doneBase: out.judged.length,
+        totalAll: consumed,
+        passedBase: out.jobs.length,
+      });
+      for (const j of batch) out.judged.push(j);
+      if (r.jobs && r.jobs.length) out.jobs.push(...r.jobs);
+      if (r.stopped) { out.stopped = true; break; }
+      // 有结果就收手；全被否决才继续往下判
+      if (out.jobs.length) break;
+      if (consumed >= passed.length) break;
+    }
+    return out;
+  }
+
+  // 精排全灭时汇总「是谁拦的」：排除词按命中条数从高到低，方向按被判成的方向名。
+  function refineBlockSummary(judged) {
+    const kws = {}, dirs = {}, others = {};
+    for (const j of [].concat(judged || [])) {
+      const why = j.refineWhy;
+      if (!why) continue;
+      if (why === 'exclude' && j.refineKw) kws[j.refineKw] = (kws[j.refineKw] || 0) + 1;
+      else if (why === 'direction' && j.refineDir) dirs[j.refineDir] = (dirs[j.refineDir] || 0) + 1;
+      else others[why] = (others[why] || 0) + 1;
+    }
+    return { kws, dirs, others };
+  }
+
+  function topCountText(map, n) {
+    return Object.keys(map).sort((a, b) => map[b] - map[a]).slice(0, n || 5)
+      .map(k => k + ' ' + map[k] + ' 条').join('、');
+  }
+
+  // 0 条时点名原因。光说「都已被精排否决」用户没法下手，得说清是哪个词/哪个方向。
+  function logRefineZero(label, judged, log) {
+    const s = refineBlockSummary(judged);
+    const parts = [];
+    const kwText = topCountText(s.kws, 5);
+    if (kwText) parts.push('命中排除词 ' + kwText);
+    const dirText = topCountText(s.dirs, 5);
+    if (dirText) parts.push('方向不符 ' + dirText);
+    // 其它原因（学历 / 薪资 / 派遣 / 外包）换成中文标签再计数
+    const othersZh = {};
+    for (const k of Object.keys(s.others)) {
+      const zh = whyLabel(k);
+      othersZh[zh] = (othersZh[zh] || 0) + s.others[k];
+    }
+    const otherText = topCountText(othersZh, 5);
+    if (otherText) parts.push(otherText);
+    if (parts.length) log(label + '否决 ' + judged.length + ' 条 — ' + parts.join('；'));
+    if (kwText) {
+      log('排除词优先于方向勾选，命中即否决。上面这些词若属于你想投的方向，'
+        + '去「简历与匹配规则 → 排除词」删掉它，点「保存规则」后重新匹配。');
+    }
   }
 
   // 粗筛为空时，把「已投 / 已忽略」这两种本机名单的原因拼成一句日志
@@ -1834,16 +1930,21 @@ window.ResumeMatch = (() => {
     }
   }
 
-  async function refineJobs(tabId, jobs, profile, log) {
+  async function refineJobs(tabId, jobs, profile, log, opts) {
     const total = jobs.length;
+    // 分批续跑时把进度接在上一批后面，进度条不要每批从 0 重来
+    const doneBase = (opts && opts.doneBase) || 0;
+    const totalAll = (opts && opts.totalAll) || total;
+    const passedBase = (opts && opts.passedBase) || 0;
     let done = 0;
     let passedCount = 0;
     const refined = [];
     let stopped = false;
     let nextIdx = 0;
 
-    const report = () => setMatchProgress('boss', {
-      done, total, passed: passedCount, running: done < total && !stopped,
+    const report = (running) => setMatchProgress('boss', {
+      done: doneBase + done, total: totalAll, passed: passedBase + passedCount,
+      running: running === undefined ? (done < total && !stopped) : running,
     });
     report();
 
@@ -1903,7 +2004,7 @@ window.ResumeMatch = (() => {
 
     const n = Math.min(REFINE_CONCURRENCY, total || 1);
     await Promise.all(Array.from({ length: n }, () => worker()));
-    setMatchProgress('boss', { done, total, passed: passedCount, running: false });
+    report(false);
     return { jobs: refined, stopped };
   }
 
@@ -2031,7 +2132,7 @@ window.ResumeMatch = (() => {
     }
 
     const listCount = passed.length;
-    log('粗筛留下 ' + passed.length + ' 条（阈值 ' + LIST_THRESHOLD + '），对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条并发精排（' + REFINE_CONCURRENCY + ' 路）');
+    log('粗筛留下 ' + passed.length + ' 条（阈值 ' + LIST_THRESHOLD + '），并发精排（' + REFINE_CONCURRENCY + ' 路），没出结果会继续判下一批');
 
     if (!passed.length) {
       if (!listed.length) {
@@ -2055,25 +2156,26 @@ window.ResumeMatch = (() => {
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
 
-    const refineTop = passed.slice(0, REFINE_MAX);
-    const refined = await refineJobs(tabId, refineTop, profile, log);
+    const refined = await refineInRounds(passed, profile, log,
+      (batch, prof, lg, opts) => refineJobs(tabId, batch, prof, lg, opts));
     let jobs = refined.jobs.slice().sort((a, b) => b.score - a.score);
     let fallback = false;
     if (!jobs.length) {
       // 回退只补「精排没判到」的岗位，精排已否决的不能放回来
-      const fb = refineFallbackJobs(refineTop);
+      const fb = refineFallbackJobs(refined.judged);
       if (fb.kept.length) {
         fallback = true;
         log('精排后为 0 条，回退未判定的 ' + fb.kept.length + ' 条'
           + (fb.dropped ? '（精排已否决 ' + fb.dropped + ' 条不放回）' : ''));
         jobs = fb.kept;
-      } else if (refineTop.length) {
+      } else if (refined.judged.length) {
         log('精排后为 0 条，且 ' + fb.dropped + ' 条都已被精排否决，本次不推荐岗位');
+        logRefineZero('精排', refined.judged, log);
       }
     }
     return {
       jobs, profile, stopped: refined.stopped, fallback, listCount,
-      refineTotal: refineTop.length, refinePassed: fallback ? 0 : jobs.length,
+      refineTotal: refined.judged.length, refinePassed: fallback ? 0 : jobs.length,
     };
   }
 
@@ -2421,16 +2523,21 @@ window.ResumeMatch = (() => {
     return r;
   }
 
-  async function refineZhaopinJobs(_tabId, jobs, profile, log) {
+  async function refineZhaopinJobs(_tabId, jobs, profile, log, opts) {
     const total = jobs.length;
+    // 分批续跑时把进度接在上一批后面
+    const doneBase = (opts && opts.doneBase) || 0;
+    const totalAll = (opts && opts.totalAll) || total;
+    const passedBase = (opts && opts.passedBase) || 0;
     let done = 0;
     let passedCount = 0;
     const refined = [];
     let stopped = false;
     let nextIdx = 0;
 
-    const report = () => setMatchProgress('zp', {
-      done, total, passed: passedCount, running: done < total && !stopped,
+    const report = (running) => setMatchProgress('zp', {
+      done: doneBase + done, total: totalAll, passed: passedBase + passedCount,
+      running: running === undefined ? (done < total && !stopped) : running,
     });
     report();
 
@@ -2486,7 +2593,7 @@ window.ResumeMatch = (() => {
       for (const id of tabIds) {
         try { await chrome.tabs.remove(id); } catch (_) {}
       }
-      setMatchProgress('zp', { done, total, passed: passedCount, running: false });
+      report(false);
     }
     return { jobs: refined, stopped };
   }
@@ -2584,7 +2691,7 @@ window.ResumeMatch = (() => {
     }
 
     const listCount = passed.length;
-    log('粗筛留下 ' + passed.length + ' 条，对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条并发精排（' + REFINE_CONCURRENCY + ' 路后台标签）');
+    log('粗筛留下 ' + passed.length + ' 条，并发精排（' + REFINE_CONCURRENCY + ' 路后台标签），没出结果会继续判下一批');
     if (!passed.length) {
       if (coarse.excludeCounts.applied) {
         log('本次搜到的岗位都在本机已投名单里。可点「清空」重置去重，或换城市/职位词后重试。');
@@ -2599,25 +2706,26 @@ window.ResumeMatch = (() => {
       }
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
-    const refineTop = passed.slice(0, REFINE_MAX);
-    const refined = await refineZhaopinJobs(tabId, refineTop, profile, log);
+    const refined = await refineInRounds(passed, profile, log,
+      (batch, prof, lg, opts) => refineZhaopinJobs(tabId, batch, prof, lg, opts));
     let jobs = refined.jobs.slice().sort((a, b) => b.score - a.score);
     let fallback = false;
     if (!jobs.length) {
       // 回退只补「精排没判到」的岗位，精排已否决的不能放回来
-      const fb = refineFallbackJobs(refineTop);
+      const fb = refineFallbackJobs(refined.judged);
       if (fb.kept.length) {
         fallback = true;
         log('智联精排后为 0 条，回退未判定的 ' + fb.kept.length + ' 条'
           + (fb.dropped ? '（精排已否决 ' + fb.dropped + ' 条不放回）' : ''));
         jobs = fb.kept;
-      } else if (refineTop.length) {
+      } else if (refined.judged.length) {
         log('智联精排后为 0 条，且 ' + fb.dropped + ' 条都已被精排否决，本次不推荐岗位');
+        logRefineZero('智联精排', refined.judged, log);
       }
     }
     return {
       jobs, profile, stopped: refined.stopped, fallback, listCount,
-      refineTotal: refineTop.length, refinePassed: fallback ? 0 : jobs.length,
+      refineTotal: refined.judged.length, refinePassed: fallback ? 0 : jobs.length,
     };
   }
 
@@ -3059,13 +3167,18 @@ window.ResumeMatch = (() => {
     return mapped;
   }
 
-  async function refine51Jobs(_tabId, jobs, profile, log) {
+  async function refine51Jobs(_tabId, jobs, profile, log, opts) {
     const total = jobs.length;
+    // 分批续跑时把进度接在上一批后面
+    const doneBase = (opts && opts.doneBase) || 0;
+    const totalAll = (opts && opts.totalAll) || total;
+    const passedBase = (opts && opts.passedBase) || 0;
     let done = 0;
     let passedCount = 0;
     const refined = [];
-    const report = () => setMatchProgress('w51', {
-      done, total, passed: passedCount, running: done < total,
+    const report = (running) => setMatchProgress('w51', {
+      done: doneBase + done, total: totalAll, passed: passedBase + passedCount,
+      running: running === undefined ? (done < total) : running,
     });
     report();
     for (let i = 0; i < jobs.length; i++) {
@@ -3077,7 +3190,7 @@ window.ResumeMatch = (() => {
       done++;
       if (done % 4 === 0 || done === total) report();
     }
-    setMatchProgress('w51', { done, total, passed: passedCount, running: false });
+    report(false);
     return { jobs: refined, stopped: false };
   }
 
@@ -3130,7 +3243,7 @@ window.ResumeMatch = (() => {
       log('前 ' + SEARCH_PAGES_MAX + ' 页列表均为 0。请在前程搜索页手动搜索后看到职位再匹配。');
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
-    log('粗筛留下 ' + passed.length + ' 条，对前 ' + Math.min(REFINE_MAX, passed.length) + ' 条精排');
+    log('粗筛留下 ' + passed.length + ' 条，分批精排（没出结果会继续判下一批）');
     if (!passed.length) {
       if (collected.excludeCounts.ignored) {
         log('前程匹配结果为 0 条：本页岗位都被你标记了「忽略」' + collected.excludeCounts.ignored + ' 条。'
@@ -3143,27 +3256,28 @@ window.ResumeMatch = (() => {
       }
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
-    const refineTop = passed.slice(0, REFINE_MAX);
-    const refined = await refine51Jobs(tabId, refineTop, profile, log);
+    const refined = await refineInRounds(passed, profile, log,
+      (batch, prof, lg, opts) => refine51Jobs(tabId, batch, prof, lg, opts));
     let jobs = refined.jobs.slice().sort((a, b) => b.score - a.score);
     let fallback = false;
     if (!jobs.length) {
       // 回退只补「精排没判到」的岗位，精排已否决的不能放回来
-      const fb = refineFallbackJobs(refineTop);
+      const fb = refineFallbackJobs(refined.judged);
       if (fb.kept.length) {
         fallback = true;
         log('前程精排后为 0 条，回退未判定的 ' + fb.kept.length + ' 条'
           + (fb.dropped ? '（精排已否决 ' + fb.dropped + ' 条不放回）' : ''));
         jobs = fb.kept;
-      } else if (refineTop.length) {
+      } else if (refined.judged.length) {
         log('前程精排后为 0 条，且 ' + fb.dropped + ' 条都已被精排否决，本次不推荐岗位');
+        logRefineZero('前程精排', refined.judged, log);
       }
     }
     try { tabUrl = (await chrome.tabs.get(tabId)).url || tabUrl; } catch (_) {}
     await rememberW51Matched(jobs, tabUrl);
     return {
       jobs, profile, stopped: refined.stopped, fallback, listCount: passed.length,
-      refineTotal: refineTop.length, refinePassed: fallback ? 0 : jobs.length,
+      refineTotal: refined.judged.length, refinePassed: fallback ? 0 : jobs.length,
     };
   }
 

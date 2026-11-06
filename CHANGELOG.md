@@ -12,6 +12,22 @@
 
 ## [Unreleased]
 
+暂无。
+
+## [2.0.5] - 2026-11-06
+
+### 修复
+
+- **排除词改按词边界匹配英文**：原来是裸子串，`LIN` 会把 `online`、`deadline`、`Linux` 一起拦掉，`CAD` 会命中 `cascade`，JD 里随口一句就能让整条岗位被误杀。现在纯英文/数字词要求两侧不是字母数字（`HIL` 不再命中 `excel`，`CANoe` 不再命中 `CANoeX`），中文词仍是子串匹配（`车载` 出现在句子里照拦）
+- **精排改成分批续跑**：以前固定只判粗筛前 20 条，这 20 条恰好都命中同一个排除词时直接返回 0 条，第 21 条起哪怕完全干净也不会被看到。现在一批全灭会继续判下一批（最多 3 批 / 60 条），已否决的岗位仍然绝不回退——`refineFallbackJobs` 只挑没判过的
+  - 智联受影响最大：它的搜索接口不返回 JD，粗筛没法用排除词拦，几乎全靠精排这一层，所以「粗筛 45 条 → 精排 0 条」时特别容易踩到
+
+### 变更
+
+- **精排全灭时点名原因**：日志汇总「命中排除词 车载 25 条、LIN 10 条、整车 5 条」并按条数从高到低排（最多 5 个），方向不符与学历/薪资/派遣也翻译成中文一起汇总，末尾给出「去「简历与匹配规则 → 排除词」删掉它，保存规则后重新匹配」的指引，不用自己一条条翻淘汰日志
+- 精排进度条接在上一批后面继续走（`refineInRounds` 的 `doneBase/totalAll`），分批续跑时不会每批从 0 重来
+- `refineTotal` / `refinePassed` 改成报「实际判过的条数」，分批续跑后在侧边栏的「精排 X/Y」也对得上
+
 ## [2.0.4] - 2026-10-29
 
 ### 新增
@@ -156,7 +172,8 @@
 
 - 修复智联投递失败
 
-[Unreleased]: https://github.com/yychuiyan/auto-resume/compare/v2.0.4...HEAD
+[Unreleased]: https://github.com/yychuiyan/auto-resume/compare/v2.0.5...HEAD
+[2.0.5]: https://github.com/yychuiyan/auto-resume/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/yychuiyan/auto-resume/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/yychuiyan/auto-resume/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/yychuiyan/auto-resume/compare/v2.0.1...v2.0.2

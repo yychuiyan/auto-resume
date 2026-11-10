@@ -1054,33 +1054,49 @@ window.ResumeMatch = (() => {
     return { kept, dropped: list.length - kept.length };
   }
 
-  // 精排总分批：默认只判粗筛前 REFINE_MAX 条，但**这一批全被否决**时继续判下一批。
-  // 否则前 20 条恰好都命中同一个排除词，后面明明干净的岗位就一起被埋了，直接归零。
-  // 硬规则不变：已否决的岗位绝不放回，只是把「还没判过的」也判一遍。
+  // 精排总分批：每批 REFINE_MAX 条，凑够 REFINE_TARGET 条合适岗就停；
+  // 不够就继续下一批（最多 REFINE_ROUNDS 批 / 60 条）。已否决的岗位绝不放回。
   const REFINE_ROUNDS = 3;
+  const REFINE_TARGET = 20;
 
   async function refineInRounds(passed, profile, log, refineFn) {
     const out = { jobs: [], stopped: false, judged: [], rounds: 0 };
     let consumed = 0;
+    const poolCap = REFINE_MAX * REFINE_ROUNDS;
     for (let round = 1; round <= REFINE_ROUNDS; round++) {
       const batch = passed.slice(consumed, consumed + REFINE_MAX);
       if (!batch.length) break;
       if (round > 1) {
-        log('前 ' + (round - 1) + ' 批精排都没出结果，继续判下一批 ' + batch.length + ' 条');
+        log('精排已通过 ' + out.jobs.length + '/' + REFINE_TARGET
+          + '，继续判第 ' + round + ' 批 ' + batch.length + ' 条');
       }
-      consumed += batch.length;
       out.rounds = round;
       const r = await refineFn(batch, profile, log, {
         doneBase: out.judged.length,
-        totalAll: consumed,
+        totalAll: Math.min(passed.length, poolCap),
         passedBase: out.jobs.length,
+        passTarget: REFINE_TARGET,
       });
-      for (const j of batch) out.judged.push(j);
+      // take() 按下标顺序取岗，done=实际判过条数；批内凑够目标时可 < batch.length
+      const doneN = Math.min(
+        typeof r.done === 'number' ? r.done : batch.length,
+        batch.length,
+      );
+      for (let i = 0; i < doneN; i++) out.judged.push(batch[i]);
+      consumed += doneN;
       if (r.jobs && r.jobs.length) out.jobs.push(...r.jobs);
       if (r.stopped) { out.stopped = true; break; }
-      // 有结果就收手；全被否决才继续往下判
-      if (out.jobs.length) break;
+      if (out.jobs.length >= REFINE_TARGET) {
+        log('精排已通过 ' + out.jobs.length + ' 条，达到目标 ' + REFINE_TARGET + '，停止');
+        break;
+      }
       if (consumed >= passed.length) break;
+    }
+    if (out.jobs.length < REFINE_TARGET && !out.stopped && out.judged.length) {
+      const why = out.rounds >= REFINE_ROUNDS && consumed < passed.length
+        ? ('已达上限 ' + poolCap + ' 条')
+        : '粗筛池已判完';
+      log('精排结束：通过 ' + out.jobs.length + '/' + REFINE_TARGET + '（' + why + '）');
     }
     return out;
   }
@@ -1936,20 +1952,22 @@ window.ResumeMatch = (() => {
     const doneBase = (opts && opts.doneBase) || 0;
     const totalAll = (opts && opts.totalAll) || total;
     const passedBase = (opts && opts.passedBase) || 0;
+    const passTarget = (opts && opts.passTarget) || 0;
     let done = 0;
     let passedCount = 0;
     const refined = [];
     let stopped = false;
     let nextIdx = 0;
 
+    const enough = () => passTarget > 0 && (passedBase + passedCount) >= passTarget;
     const report = (running) => setMatchProgress('boss', {
       done: doneBase + done, total: totalAll, passed: passedBase + passedCount,
-      running: running === undefined ? (done < total && !stopped) : running,
+      running: running === undefined ? (done < total && !stopped && !enough()) : running,
     });
     report();
 
     const take = () => {
-      if (stopped) return null;
+      if (stopped || enough()) return null;
       const i = nextIdx++;
       return i < total ? jobs[i] : null;
     };
@@ -1998,14 +2016,14 @@ window.ResumeMatch = (() => {
         }
         done++;
         report();
-        if (!stopped && done < total) await sleep(DETAIL_GAP_MS / REFINE_CONCURRENCY);
+        if (!stopped && !enough() && done < total) await sleep(DETAIL_GAP_MS / REFINE_CONCURRENCY);
       }
     }
 
     const n = Math.min(REFINE_CONCURRENCY, total || 1);
     await Promise.all(Array.from({ length: n }, () => worker()));
     report(false);
-    return { jobs: refined, stopped };
+    return { jobs: refined, stopped, done };
   }
 
   // 列表粗筛：打分 + 阈值过滤，返回通过的岗位和排除原因统计
@@ -2132,7 +2150,7 @@ window.ResumeMatch = (() => {
     }
 
     const listCount = passed.length;
-    log('粗筛留下 ' + passed.length + ' 条（阈值 ' + LIST_THRESHOLD + '），并发精排（' + REFINE_CONCURRENCY + ' 路），没出结果会继续判下一批');
+    log('粗筛留下 ' + passed.length + ' 条（阈值 ' + LIST_THRESHOLD + '），并发精排（' + REFINE_CONCURRENCY + ' 路），凑够 ' + REFINE_TARGET + ' 条合适岗就停');
 
     if (!passed.length) {
       if (!listed.length) {
@@ -2529,15 +2547,17 @@ window.ResumeMatch = (() => {
     const doneBase = (opts && opts.doneBase) || 0;
     const totalAll = (opts && opts.totalAll) || total;
     const passedBase = (opts && opts.passedBase) || 0;
+    const passTarget = (opts && opts.passTarget) || 0;
     let done = 0;
     let passedCount = 0;
     const refined = [];
     let stopped = false;
     let nextIdx = 0;
 
+    const enough = () => passTarget > 0 && (passedBase + passedCount) >= passTarget;
     const report = (running) => setMatchProgress('zp', {
       done: doneBase + done, total: totalAll, passed: passedBase + passedCount,
-      running: running === undefined ? (done < total && !stopped) : running,
+      running: running === undefined ? (done < total && !stopped && !enough()) : running,
     });
     report();
 
@@ -2549,7 +2569,7 @@ window.ResumeMatch = (() => {
     }
 
     const take = () => {
-      if (stopped) return null;
+      if (stopped || enough()) return null;
       const i = nextIdx++;
       return i < total ? jobs[i] : null;
     };
@@ -2583,7 +2603,7 @@ window.ResumeMatch = (() => {
         }
         done++;
         report();
-        if (!stopped && done < total) await sleep(DETAIL_GAP_MS / REFINE_CONCURRENCY);
+        if (!stopped && !enough() && done < total) await sleep(DETAIL_GAP_MS / REFINE_CONCURRENCY);
       }
     }
 
@@ -2595,7 +2615,7 @@ window.ResumeMatch = (() => {
       }
       report(false);
     }
-    return { jobs: refined, stopped };
+    return { jobs: refined, stopped, done };
   }
 
   // 智联列表粗筛（含公司名，方便对照）
@@ -2691,7 +2711,7 @@ window.ResumeMatch = (() => {
     }
 
     const listCount = passed.length;
-    log('粗筛留下 ' + passed.length + ' 条，并发精排（' + REFINE_CONCURRENCY + ' 路后台标签），没出结果会继续判下一批');
+    log('粗筛留下 ' + passed.length + ' 条，并发精排（' + REFINE_CONCURRENCY + ' 路后台标签），凑够 ' + REFINE_TARGET + ' 条合适岗就停');
     if (!passed.length) {
       if (coarse.excludeCounts.applied) {
         log('本次搜到的岗位都在本机已投名单里。可点「清空」重置去重，或换城市/职位词后重试。');
@@ -3063,8 +3083,8 @@ window.ResumeMatch = (() => {
         }
       }
       log('第 ' + page + ' 页可见 ' + listed.length + '，新增可投 ' + pageNew + '（累计 ' + passed.length + '）');
-      if (passed.length >= REFINE_MAX) break;
-      if (pageNew > 0) break; // 本页已有新岗，先精排这批；再点匹配会跳过它们并继续翻页
+      // 粗筛池攒到可分批精排的上限再停，否则「凑够 20 条合适岗」经常池子不够
+      if (passed.length >= REFINE_MAX * REFINE_ROUNDS) break;
     }
 
     passed.sort((a, b) => b.score - a.score);
@@ -3173,25 +3193,28 @@ window.ResumeMatch = (() => {
     const doneBase = (opts && opts.doneBase) || 0;
     const totalAll = (opts && opts.totalAll) || total;
     const passedBase = (opts && opts.passedBase) || 0;
+    const passTarget = (opts && opts.passTarget) || 0;
     let done = 0;
     let passedCount = 0;
     const refined = [];
+    const enough = () => passTarget > 0 && (passedBase + passedCount) >= passTarget;
     const report = (running) => setMatchProgress('w51', {
       done: doneBase + done, total: totalAll, passed: passedBase + passedCount,
-      running: running === undefined ? (done < total) : running,
+      running: running === undefined ? (done < total && !enough()) : running,
     });
     report();
     for (let i = 0; i < jobs.length; i++) {
+      if (enough()) break;
       const job = jobs[i];
       if (tryRefinePass(job, profile, { cityName: job.cityName }, log, '前程精排')) {
         refined.push(job);
         passedCount++;
       }
       done++;
-      if (done % 4 === 0 || done === total) report();
+      if (done % 4 === 0 || done === total || enough()) report();
     }
     report(false);
-    return { jobs: refined, stopped: false };
+    return { jobs: refined, stopped: false, done };
   }
 
   async function saveW51SearchCtx(profile) {
@@ -3243,7 +3266,7 @@ window.ResumeMatch = (() => {
       log('前 ' + SEARCH_PAGES_MAX + ' 页列表均为 0。请在前程搜索页手动搜索后看到职位再匹配。');
       return { jobs: [], profile, stopped: false, fallback: false, listCount: 0 };
     }
-    log('粗筛留下 ' + passed.length + ' 条，分批精排（没出结果会继续判下一批）');
+    log('粗筛留下 ' + passed.length + ' 条，分批精排（凑够 ' + REFINE_TARGET + ' 条合适岗就停）');
     if (!passed.length) {
       if (collected.excludeCounts.ignored) {
         log('前程匹配结果为 0 条：本页岗位都被你标记了「忽略」' + collected.excludeCounts.ignored + ' 条。'

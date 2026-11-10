@@ -257,8 +257,8 @@ function setSelectedDegrees(list) {
   if (btn) btn.textContent = all ? '全部' : want.join('、');
 }
 
-// 学历 / 方向选择 / 排除词 三个下拉同一时间只开一个
-const MSEL_IDS = ['pfDegree', 'pfDirection', 'pfExclude'];
+// 学历 / 方向选择 / 排除词 / 薪资 / 规模：同一时间只开一个
+const MSEL_IDS = ['pfDegree', 'pfDirection', 'pfExclude', 'pfSalary', 'pfScale'];
 
 function closeOtherMsels(keep) {
   for (const id of MSEL_IDS) {
@@ -303,6 +303,78 @@ function bindDegreePicker() {
     }
     setSelectedDegrees(getSelectedDegrees());
   });
+}
+
+// 薪资 / 公司规模：单选自定义下拉（替代原生 <select>，样式跟学历下拉一致）
+const SALARY_OPTS = [
+  { v: 0, t: '不限' },
+  { v: 8, t: '8K+' }, { v: 10, t: '10K+' }, { v: 12, t: '12K+' },
+  { v: 13, t: '13K+' }, { v: 14, t: '14K+' }, { v: 15, t: '15K+' },
+  { v: 20, t: '20K+' }, { v: 25, t: '25K+' }, { v: 30, t: '30K+' },
+];
+const SCALE_OPTS = [
+  { v: 0, t: '不限' },
+  { v: 20, t: '20人+' }, { v: 100, t: '100人+' }, { v: 500, t: '500人+' },
+  { v: 1000, t: '1000人+' }, { v: 10000, t: '10000人+' },
+];
+
+function pickOptLabel(opts, value) {
+  const n = Number(value) || 0;
+  const hit = opts.find((o) => o.v === n);
+  return hit ? hit.t : opts[0].t;
+}
+
+function getPickValue(id) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return 0;
+  const n = parseInt(wrap.dataset.value, 10);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+function setPickValue(id, value, opts) {
+  const wrap = document.getElementById(id);
+  const btn = document.getElementById(id + 'Btn');
+  const list = document.getElementById(id + 'List');
+  if (!wrap) return;
+  const n = Number(value) || 0;
+  const hit = opts.find((o) => o.v === n);
+  const use = hit ? hit.v : 0;
+  wrap.dataset.value = String(use);
+  if (btn) btn.textContent = pickOptLabel(opts, use);
+  if (list) {
+    list.querySelectorAll('.msel-opt').forEach((el) => {
+      el.classList.toggle('on', Number(el.dataset.v) === use);
+    });
+  }
+}
+
+function bindSinglePicker(id, opts) {
+  const wrap = document.getElementById(id);
+  const btn = document.getElementById(id + 'Btn');
+  const list = document.getElementById(id + 'List');
+  if (!wrap || !btn || !list || wrap.dataset.bound) return;
+  wrap.dataset.bound = '1';
+  list.innerHTML = opts.map((o) =>
+    '<button type="button" class="msel-opt" data-v="' + o.v + '">' + o.t + '</button>'
+  ).join('');
+  setPickValue(id, wrap.dataset.value || 0, opts);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeOtherMsels(id);
+    wrap.classList.toggle('open');
+  });
+  list.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const t = e.target && e.target.closest && e.target.closest('.msel-opt');
+    if (!t) return;
+    setPickValue(id, t.dataset.v, opts);
+    wrap.classList.remove('open');
+  });
+}
+
+function bindSalaryScalePickers() {
+  bindSinglePicker('pfSalary', SALARY_OPTS);
+  bindSinglePicker('pfScale', SCALE_OPTS);
 }
 
 let directionOptionsCache = [];
@@ -943,10 +1015,8 @@ function fillProfileEditor(p) {
   document.getElementById('pfCity').value = p.city || '';
   document.getElementById('pfSkills').value = (p.skills || []).join('\n');
   document.getElementById('pfWork').value = (p.workKeywords || []).join('\n');
-  const sal = document.getElementById('pfSalary');
-  if (sal) sal.value = String(p.salaryMin > 0 ? p.salaryMin : 0);
-  const sc = document.getElementById('pfScale');
-  if (sc) sc.value = String(p.scaleMin > 0 ? p.scaleMin : 0);
+  setPickValue('pfSalary', p.salaryMin > 0 ? p.salaryMin : 0, SALARY_OPTS);
+  setPickValue('pfScale', p.scaleMin > 0 ? p.scaleMin : 0, SCALE_OPTS);
   setSelectedDegrees(p.degrees || []);
   const dirOpts = (window.ResumeMatch && window.ResumeMatch.directionOptionsOf)
     ? window.ResumeMatch.directionOptionsOf(p)
@@ -1242,8 +1312,8 @@ async function saveProfileEdits() {
       city: document.getElementById('pfCity').value.trim(),
       skills: splitProfileList(document.getElementById('pfSkills').value),
       workKeywords: splitProfileList(document.getElementById('pfWork').value),
-      salaryMin: parseInt(document.getElementById('pfSalary').value, 10) || 0,
-      scaleMin: parseInt(document.getElementById('pfScale').value, 10) || 0,
+      salaryMin: getPickValue('pfSalary'),
+      scaleMin: getPickValue('pfScale'),
       degrees: getSelectedDegrees(),
     }));
     // 只保留还在候选里的方向关键词，删掉的方向不再留残留
@@ -2552,6 +2622,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await restoreFoldStates();
   bindMselOutsideClick();
   bindDegreePicker();
+  bindSalaryScalePickers();
   bindDirectionPicker();
   bindExcludePicker();
   bindTextareaFit();

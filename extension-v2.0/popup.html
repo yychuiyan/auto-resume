@@ -115,6 +115,12 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .msel-list > label:first-child{margin-top:4px}
 .msel-list > label:last-child{margin-bottom:4px}
 .msel-list label:hover{background:#16213e}
+/* 单选下拉（薪资 / 公司规模）：点一项即选中并收起，选中项高亮 */
+.msel-opt{display:block;width:100%;margin:0;padding:5px 8px;border:0;background:transparent;color:#e0e0e0;font-size:11px;line-height:1.4;text-align:left;cursor:pointer;font-family:inherit}
+.msel-list > .msel-opt:first-child{margin-top:4px}
+.msel-list > .msel-opt:last-child{margin-bottom:4px}
+.msel-opt:hover{background:#16213e}
+.msel-opt.on{color:#a5b4fc;background:#16213e}
 .msel-list input{width:auto;margin:0;accent-color:#6366f1}
 .msel-list label.dir{padding:4px 8px}
 .msel-list label.dir .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:text;border-bottom:1px dashed transparent;padding-bottom:1px}
@@ -279,29 +285,19 @@ body.resume-collapsed #log{min-height:min(320px,48vh)}
       </div>
       <div class="field">
         <label>薪资（最低月薪）</label>
-        <select id="pfSalary">
-          <option value="0">不限</option>
-          <option value="8">8K+</option>
-          <option value="10">10K+</option>
-          <option value="12">12K+</option>
-          <option value="15">15K+</option>
-          <option value="20">20K+</option>
-          <option value="25">25K+</option>
-          <option value="30">30K+</option>
-        </select>
+        <div class="msel" id="pfSalary" data-value="0">
+          <button type="button" class="msel-btn" id="pfSalaryBtn">不限</button>
+          <div class="msel-list" id="pfSalaryList"></div>
+        </div>
       </div>
     </div>
     <div class="field-row">
       <div class="field">
         <label>公司规模</label>
-        <select id="pfScale">
-          <option value="0">不限</option>
-          <option value="20">20人+</option>
-          <option value="100">100人+</option>
-          <option value="500">500人+</option>
-          <option value="1000">1000人+</option>
-          <option value="10000">10000人+</option>
-        </select>
+        <div class="msel" id="pfScale" data-value="0">
+          <button type="button" class="msel-btn" id="pfScaleBtn">不限</button>
+          <div class="msel-list" id="pfScaleList"></div>
+        </div>
       </div>
       <div class="field">
         <label>学历</label>

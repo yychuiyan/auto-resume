@@ -14,6 +14,13 @@
 
 暂无。
 
+## [2.0.6] - 2026-11-10
+
+### 变更
+
+- **薪资 / 公司规模改用自定义下拉**：与学历、方向同一套 `.msel` 样式，不再用浏览器原生 `<select>`；点开选一项即收起，当前项高亮，五个下拉互斥
+- **薪资选项补上 13K+ / 14K+**：原来 12K 和 15K 之间跨度偏大，中间两档现在也能选
+
 ## [2.0.5] - 2026-11-06
 
 ### 修复
@@ -172,7 +179,8 @@
 
 - 修复智联投递失败
 
-[Unreleased]: https://github.com/yychuiyan/auto-resume/compare/v2.0.5...HEAD
+[Unreleased]: https://github.com/yychuiyan/auto-resume/compare/v2.0.6...HEAD
+[2.0.6]: https://github.com/yychuiyan/auto-resume/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/yychuiyan/auto-resume/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/yychuiyan/auto-resume/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/yychuiyan/auto-resume/compare/v2.0.2...v2.0.3

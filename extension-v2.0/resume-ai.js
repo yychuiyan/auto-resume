@@ -546,13 +546,25 @@ window.ResumeAI = (() => {
     const aiKwEx = profile.excludeKeywords !== undefined
       ? cleanExcludeKeywords(profile.excludeKeywords)
       : null;
+    // 单独记一份「上次 AI 生成的排除词」。重新解析时用新的一批**替换**旧的，
+    // 而不是并集——否则每解析一次就多攒几个，几轮下来 8 个会变成 20 多个，
+    // 把整个候选池都清空（这正是智联「0 条」的常见原因）。
+    const prevAiKw = Array.isArray(prev.excludeKeywordsAi) ? prev.excludeKeywordsAi : null;
+    // 旧数据没有这份记录，无法区分手加和 AI 生成：统一当作 AI 生成，
+    // 下次解析时整体替换，先把膨胀的名单收敛回来。
+    const prevCustomKw = prevAiKw
+      ? prevKwEx.filter(w => !hasCI(prevAiKw, w))
+      : [];
     let excludeKeywords;
-    // 重新解析时用「并集 − 墓碑」；只有明确带了新词才合并，
+    let excludeKeywordsAi = prevAiKw || [];
+    // 重新解析：用户手加的词 + AI 这一轮的新词 − 墓碑。
     // AI 这次没给（null）就沿用旧名单，不能因为 AI 漏给就清空。
     if (wasReparse && aiKwEx !== null) {
-      excludeKeywords = cleanExcludeKeywords([].concat(prevKwEx, aiKwEx))
+      excludeKeywords = cleanExcludeKeywords([].concat(prevCustomKw, aiKwEx))
         .filter(w => !hasCI(removedKw, w));
+      excludeKeywordsAi = aiKwEx.slice();
     } else if (aiKwEx !== null) {
+      // 手动保存：原样存当前名单，AI 那份记忆不变
       excludeKeywords = aiKwEx;
     } else {
       excludeKeywords = cleanExcludeKeywords(prevKwEx);
@@ -572,6 +584,12 @@ window.ResumeAI = (() => {
       directionKeywords: dirKeywords,
       otherDirections,
       excludeKeywords,
+      // 系统筛选开关：用户可以任意组合，空数组 = 全部不过滤
+      systemFilters: profile.systemFilters !== undefined
+        ? (Array.isArray(profile.systemFilters) ? profile.systemFilters.slice() : [])
+        : (Array.isArray(prev.systemFilters) ? prev.systemFilters : undefined),
+      // 记住这一轮是由 AI 生成的哪些词，下次重新解析时整体替换掉它们
+      excludeKeywordsAi: excludeKeywordsAi.slice(),
       // 三份「用户记忆」：重解析时用来挡住 AI 的覆盖
       excludeKeywordsRemoved: removedKw.slice(),
       directionsRemoved: removedDirs.slice(),

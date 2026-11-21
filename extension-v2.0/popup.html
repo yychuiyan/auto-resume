@@ -109,6 +109,8 @@ body{font-family:-apple-system,'PingFang SC',sans-serif;background:#1a1a2e;color
 .msel{position:relative}
 .msel-btn{width:100%;padding:6px 8px;background:#0f0f23;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:12px;text-align:left;cursor:pointer;font-family:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msel.open .msel-btn{border-color:#6366f1}
+/* 排除词过多时标黄：超过 12 个基本会把候选池清空 */
+.msel-btn.warn{border-color:#7c5a1a;color:#fbbf24}
 .msel-list{display:none;position:absolute;z-index:8;left:0;right:0;top:100%;margin-top:2px;background:#0f0f23;border:1px solid #333;border-radius:4px;max-height:240px;overflow:auto}
 .msel.open .msel-list{display:block}
 .msel-list label{display:flex;align-items:center;gap:6px;padding:4px 8px;color:#e0e0e0;font-size:11px;cursor:pointer}
@@ -335,7 +337,9 @@ body.resume-collapsed #log{min-height:min(320px,48vh)}
         <div class="msel" id="pfExclude">
           <button type="button" class="msel-btn" id="pfExcludeBtn">未设置</button>
           <div class="msel-list" id="pfExcludeList">
-            <div class="msel-note">命中这些词的岗位直接排除（岗位名/技能/标签/JD 都算），优先级高于方向选择。</div>
+            <div class="msel-note">命中这些词的岗位直接排除（岗位名/技能/标签/JD 都算），优先级高于方向选择。
+              <button type="button" class="linkbtn" id="pfExcludeClear" title="清空全部排除词，重新开始">清空</button>
+            </div>
             <div id="pfExcludeItems"></div>
             <div class="msel-sep" id="pfExcludeAutoWrap">
               <div class="msel-sep-hd">
@@ -353,6 +357,14 @@ body.resume-collapsed #log{min-height:min(320px,48vh)}
       </div>
     </div>
     <div class="hint" id="pfExcludeHint" style="display:none">方向选了「全部」时排除词不生效；重新勾选具体方向后恢复。</div>
+    <div class="field">
+      <label>系统筛选</label>
+      <div class="msel" id="pfSysFilter">
+        <button type="button" class="msel-btn" id="pfSysFilterBtn">系统筛选</button>
+        <div class="msel-list" id="pfSysFilterList"></div>
+      </div>
+      <div class="hint">勾选的规则才会过滤。默认放行「代招」和「岗位含外包」；把「已投/已沟通」取消勾选可以重新看到本机去重里的岗位。</div>
+    </div>
     <div class="field-row">
       <div class="field">
         <label>技能</label>

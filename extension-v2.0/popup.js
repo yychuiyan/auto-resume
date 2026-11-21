@@ -257,8 +257,8 @@ function setSelectedDegrees(list) {
   if (btn) btn.textContent = all ? '全部' : want.join('、');
 }
 
-// 学历 / 方向选择 / 排除词 / 薪资 / 规模：同一时间只开一个
-const MSEL_IDS = ['pfDegree', 'pfDirection', 'pfExclude', 'pfSalary', 'pfScale'];
+// 学历 / 方向选择 / 排除词 / 系统筛选 / 薪资 / 规模：同一时间只开一个
+const MSEL_IDS = ['pfDegree', 'pfDirection', 'pfExclude', 'pfSysFilter', 'pfSalary', 'pfScale'];
 
 function closeOtherMsels(keep) {
   for (const id of MSEL_IDS) {
@@ -394,6 +394,68 @@ let editedKeywordsCache = new Set();
 let directionUnlimited = true;
 // 方向编辑器渲染过没有：没渲染过时缓存是空的，不能拿它回写覆盖已存画像
 let directionEditorReady = false;
+// 系统筛选：勾选的硬规则才生效；默认放行代招与岗位含外包
+let systemFilterList = [];
+
+function sysFilterCatalog() {
+  const RM = window.ResumeMatch;
+  return (RM && Array.isArray(RM.SYSTEM_FILTERS)) ? RM.SYSTEM_FILTERS : [];
+}
+
+function normalizeSysFilterList(list) {
+  const keys = sysFilterCatalog().map(f => f.key);
+  if (list === undefined || list === null) {
+    const RM = window.ResumeMatch;
+    return (RM && Array.isArray(RM.DEFAULT_SYSTEM_FILTERS))
+      ? RM.DEFAULT_SYSTEM_FILTERS.slice()
+      : ['dispatch', 'outsource', 'campus', 'hunter', 'unselect', 'applied', 'resumeFlow'];
+  }
+  return [].concat(list).map(String).filter(k => keys.indexOf(k) >= 0);
+}
+
+function sysFilterSummary() {
+  const all = sysFilterCatalog();
+  const on = systemFilterList.length;
+  if (!on) return '不限制（全部放行）';
+  if (all.length && on >= all.length) return '全部启用';
+  return '启用 ' + on + ' 项';
+}
+
+function renderSystemFilters() {
+  const box = document.getElementById('pfSysFilterList');
+  const btn = document.getElementById('pfSysFilterBtn');
+  if (btn) btn.textContent = '系统筛选 · ' + sysFilterSummary();
+  if (!box) return;
+  const on = new Set(systemFilterList);
+  box.innerHTML = sysFilterCatalog().map(f =>
+    '<label><input type="checkbox" data-sysfilter="' + escHtml(f.key) + '"'
+    + (on.has(f.key) ? ' checked' : '') + '> ' + escHtml(f.label) + '</label>').join('');
+}
+
+function bindSysFilterPicker() {
+  const wrap = document.getElementById('pfSysFilter');
+  const btn = document.getElementById('pfSysFilterBtn');
+  const list = document.getElementById('pfSysFilterList');
+  if (!wrap || !btn || !list || wrap.dataset.bound) return;
+  wrap.dataset.bound = '1';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeOtherMsels('pfSysFilter');
+    renderSystemFilters();
+    wrap.classList.toggle('open');
+  });
+  list.addEventListener('click', (e) => e.stopPropagation());
+  list.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    const key = t.getAttribute('data-sysfilter');
+    if (!key) return;
+    const set = new Set(systemFilterList);
+    if (t.checked) set.add(key); else set.delete(key);
+    systemFilterList = sysFilterCatalog().map(f => f.key).filter(k => set.has(k));
+    renderSystemFilters();
+  });
+}
 
 function directionWordsOf(name) {
   const n = String(name || '');
@@ -514,7 +576,11 @@ function syncExcludeUI() {
     wrap.classList.toggle('disabled', directionUnlimited);
     if (directionUnlimited) wrap.classList.remove('open');
   }
-  if (btn) btn.textContent = excludeSummary();
+  if (btn) {
+    btn.textContent = excludeSummary();
+    // 超过 12 个基本就会把池子清空，标黄提醒（尤其是多次解析累积出来的）
+    btn.classList.toggle('warn', excludeKeywordList.length > 12);
+  }
   if (hint) hint.style.display = directionUnlimited ? '' : 'none';
 }
 
@@ -565,6 +631,8 @@ function addExcludeWords(words, opts) {
   if (!add.length) return 0;
   const silent = !!(opts && opts.silent);
   const before = excludeKeywordList.length;
+  const prevLow = new Set(excludeKeywordList.map(x => x.toLowerCase()));
+  const addedNew = add.filter(w => !prevLow.has(w.toLowerCase()));
   excludeKeywordList = normalizeExcludeWords([].concat(excludeKeywordList, add));
   // 加回来的词要从墓碑里摘掉，否则下次重新解析它又会被删掉
   for (const w of add) {
@@ -574,7 +642,18 @@ function addExcludeWords(words, opts) {
   syncExcludeUI();
   const n = excludeKeywordList.length - before;
   if (!silent) {
-    if (n > 0) setFlash('profileSaveMsg', '已加入 ' + n + ' 个排除词，点「保存规则」生效', 'ok');
+    if (n > 0) {
+      // 2~4 个字母的短英文词极易误伤（CAN 会命中英文 can，HIL 可能命中别人名字缩写），
+      // 加进去照旧生效，但提醒一句，让用户知道该盯什么
+      const risky = addedNew.filter(w => /^[A-Za-z]{2,4}$/.test(w));
+      if (risky.length) {
+        setFlash('profileSaveMsg',
+          '已加入 ' + n + ' 个，但「' + risky.join('、') + '」这类短英文词容易误伤，'
+          + '建议加限定词（如 CAN总线、HIL台架）', 'er', { hold: true });
+      } else {
+        setFlash('profileSaveMsg', '已加入 ' + n + ' 个排除词，点「保存规则」生效', 'ok');
+      }
+    }
     else setFlash('profileSaveMsg', '没有新增（可能已在名单里，或属于「测试/开发」这类泛词）', 'er');
   }
   return n;
@@ -590,6 +669,19 @@ function removeExcludeWord(word) {
   }
   renderExcludePanel();
   syncExcludeUI();
+}
+
+// 一键重置：清空名单并清掉墓碑，下次解析会按简历重新生成一组。
+// 22 个词往往是多次解析累积出来的，逐个删太费劲。
+function clearExcludeWords() {
+  if (!excludeKeywordList.length) return;
+  const n = excludeKeywordList.length;
+  excludeKeywordList = [];
+  // 重置语义：墓碑也一起清掉，否则重新解析给的同名建议会被墓碑永久压住
+  removedKeywordsCache = [];
+  renderExcludePanel();
+  syncExcludeUI();
+  setFlash('profileSaveMsg', '已清空 ' + n + ' 个排除词；重新解析会按简历重新生成一组。点「保存规则」生效', 'ok', { hold: true });
 }
 
 function renameExcludeWord(oldWord, next) {
@@ -924,6 +1016,11 @@ function bindExcludePicker() {
     e.stopPropagation();
     const t = e.target;
     if (!t || !t.closest) return;
+    if (t.closest('#pfExcludeClear')) {
+      e.preventDefault();
+      clearExcludeWords();
+      return;
+    }
     const del = t.closest('.msel-del');
     if (del) {
       e.preventDefault();
@@ -1032,6 +1129,8 @@ function fillProfileEditor(p) {
     : (p.directions || []);
   // 排除词与三份记忆：AI 生成的那份 + 用户手加/手删/手改的记录
   excludeKeywordList = normalizeExcludeWords(p && p.excludeKeywords);
+  systemFilterList = normalizeSysFilterList(p && p.systemFilters);
+  renderSystemFilters();
   removedKeywordsCache = [].concat((p && p.excludeKeywordsRemoved) || []);
   directionsRemovedCache = [].concat((p && p.directionsRemoved) || []);
   editedKeywordsCache = new Set((p && p.directionKeywordsEdited) || []);
@@ -1325,6 +1424,7 @@ async function saveProfileEdits() {
     const profile = Object.assign({}, base, {
       directions: getSelectedDirections(),
       excludeKeywords: excludeKeywordList.slice(),
+      systemFilters: systemFilterList.slice(),
       directionOptions: directionOptionsCache.slice(),
       directionKeywords: keywords,
       // AI 给的相邻干扰方向沿用上次解析结果
@@ -2276,11 +2376,14 @@ async function persistDirections() {
     const same = JSON.stringify(picked) === JSON.stringify(prev.directions || [])
       && JSON.stringify(opts) === JSON.stringify(prev.directionOptions || [])
       && JSON.stringify(keywords) === JSON.stringify(prev.directionKeywords || {})
-      && JSON.stringify(excludeKeywordList) === JSON.stringify(prev.excludeKeywords || []);
+      && JSON.stringify(excludeKeywordList) === JSON.stringify(prev.excludeKeywords || [])
+      && JSON.stringify(systemFilterList) === JSON.stringify(
+        Array.isArray(prev.systemFilters) ? prev.systemFilters : normalizeSysFilterList(undefined));
     if (same) return;
     await window.ResumeAI.saveProfile(Object.assign({}, prev, {
       directions: picked,
       excludeKeywords: excludeKeywordList.slice(),
+      systemFilters: systemFilterList.slice(),
       directionOptions: opts,
       directionKeywords: keywords,
       otherDirections: prev.otherDirections || {},
@@ -2625,6 +2728,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindSalaryScalePickers();
   bindDirectionPicker();
   bindExcludePicker();
+  bindSysFilterPicker();
   bindTextareaFit();
   await initBlocklist();
   // 显示已加载的版本，方便确认改动是否真的生效（没重载扩展会看到旧版本号）

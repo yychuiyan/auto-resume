@@ -12,6 +12,7 @@ const PLAT_LABEL = { boss: 'BOSS', zp: '智联', w51: '前程' };
 const appliedCache = { boss: new Set(), zp: new Set(), w51: new Set() };
 const ignoredCache = { boss: new Set(), zp: new Set(), w51: new Set() };
 const IGNORED_CAP = 10000;
+const cityBlockedCache = { boss: 0, zp: 0, w51: 0 };
 
 // 用本地日期而不是 toISOString（UTC）：否则「今日」在北京时间早上 8 点就换天了
 function todayKey() {
@@ -1789,10 +1790,14 @@ function jobIdOf(job) {
   return String((job && (job.encryptId || job.jobId)) || '').trim();
 }
 
-function pendingJobs(platform) {
+async function pendingJobs(platform) {
   const rm = window.ResumeMatch;
   if (rm && typeof rm.pendingJobsOf === 'function') {
-    return rm.pendingJobsOf(jobsOf(platform), appliedCache[platform], ignoredCache[platform]);
+    const profile = await window.ResumeAI.loadProfile();
+    const candidates = rm.pendingJobsOf(jobsOf(platform), appliedCache[platform], ignoredCache[platform]);
+    const pending = rm.pendingJobsOf(candidates, appliedCache[platform], ignoredCache[platform], profile);
+    cityBlockedCache[platform] = candidates.length - pending.length;
+    return pending;
   }
   return jobsOf(platform).filter((j) => {
     const id = jobIdOf(j);
@@ -1942,7 +1947,7 @@ function guardStatsOf(platform) {
     const m = marks[id];
     if (m && m.s === 'fail' && !applied.has(id) && !ignored.has(id)) failN++;
   }
-  return { list, appliedN, ignoredN, missing, failN, allApplied, allIgnored, total: list.length };
+  return { list, appliedN, ignoredN, missing, failN, cityN: cityBlockedCache[platform], allApplied, allIgnored, total: list.length };
 }
 
 // 一条也说不出「还能投什么」时的原因文案（按钮提示与硬拦截共用）
@@ -1960,6 +1965,7 @@ function blockedReasonText(platform, stats) {
   if (s.failN) parts.push('失败 ' + s.failN);
   if (s.ignoredN) parts.push('忽略 ' + s.ignoredN);
   if (s.missing) parts.push('缺 id ' + s.missing);
+  if (s.cityN) return `本批没有可投岗位，其中 ${s.cityN} 条城市不符或地点不明，请重新匹配后再投`;
   // 只有缺 id：不是投递/忽略导致的，直接说清无法投递，别让用户以为被名单挡了
   if (!s.appliedN && !s.ignoredN && s.missing) {
     return `本批 ${n} 条都没有可用的岗位 id，无法投递，请重新匹配后再试`;
@@ -1991,7 +1997,7 @@ async function refreshApplyGuard(platform) {
     return;
   }
 
-  const pending = pendingJobs(platform);
+  const pending = await pendingJobs(platform);
   if (!pending.length) {
     if (btn) btn.disabled = true;
     if (hintEl) hintEl.textContent = blockedReasonText(platform) + '。';
@@ -2006,6 +2012,7 @@ async function refreshApplyGuard(platform) {
     if (stats.failN) parts.push('失败 ' + stats.failN);
     if (stats.ignoredN) parts.push('忽略 ' + stats.ignoredN);
     if (stats.missing) parts.push('缺 id ' + stats.missing);
+    if (stats.cityN) parts.push('城市不符/不明 ' + stats.cityN);
     hintEl.textContent = `待投 ${pending.length}/${list.length} 条`
       + (parts.length ? `（${parts.join('、')} 已剔除）` : '');
   }
@@ -2473,11 +2480,11 @@ async function startBossBatch() {
   }
   // 已投 / 忽略 都从缓存取（初始化与每次刷新计数时同步过）；保险起见再读一次 storage
   await loadGuardSets('boss');
-  const pending = pendingJobs('boss');
+  const pending = await pendingJobs('boss');
   if (!pending.length) { blockApply('boss'); return; }
   const cnt = Math.min(parseInt(document.getElementById('cnt').value) || 5, pending.length);
   const jobs = pending.slice(0, cnt);
-  info(`待投 ${pending.length} 条，本次发 ${jobs.length} 条（已投/忽略已剔除）`);
+  info(`待投 ${pending.length} 条，本次发 ${jobs.length} 条（已投/忽略/城市不符或不明已剔除）`);
   const minInt = parseInt(document.getElementById('min').value) || 3;
   const maxInt = parseInt(document.getElementById('max').value) || 5;
   chrome.storage.local.set({ minInt, maxInt });
@@ -2590,11 +2597,11 @@ async function startZpBatch() {
     return;
   }
   await loadGuardSets('zp');
-  const pending = pendingJobs('zp');
+  const pending = await pendingJobs('zp');
   if (!pending.length) { blockApply('zp'); return; }
   const cnt = Math.min(parseInt(document.getElementById('zCnt').value) || 5, pending.length);
   const jobs = pending.slice(0, cnt);
-  info(`待投 ${pending.length} 条，本次发 ${jobs.length} 条（已投/忽略已剔除）`);
+  info(`待投 ${pending.length} 条，本次发 ${jobs.length} 条（已投/忽略/城市不符或不明已剔除）`);
   const minInt = parseInt(document.getElementById('zMin').value) || 3;
   const maxInt = parseInt(document.getElementById('zMax').value) || 5;
   chrome.storage.local.set({ minInt, maxInt });
@@ -2680,11 +2687,11 @@ async function startW51Batch() {
     return;
   }
   await loadGuardSets('w51');
-  const pending = pendingJobs('w51');
+  const pending = await pendingJobs('w51');
   if (!pending.length) { blockApply('w51'); return; }
   const cnt = Math.min(parseInt(document.getElementById('wCnt').value) || 5, pending.length);
   const jobs = pending.slice(0, cnt);
-  info(`待投 ${pending.length} 条，本次发 ${jobs.length} 条（已投/忽略已剔除）`);
+  info(`待投 ${pending.length} 条，本次发 ${jobs.length} 条（已投/忽略/城市不符或不明已剔除）`);
   const minInt = parseInt(document.getElementById('wMin').value) || 3;
   const maxInt = parseInt(document.getElementById('wMax').value) || 5;
   chrome.storage.local.set({ minInt, maxInt });

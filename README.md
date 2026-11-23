@@ -9,7 +9,7 @@ Chrome 扩展，分两个独立版本：
 
 两个扩展可同时安装，互不影响。
 
-当前 `extension-v2.0` 版本：**2.0.8**（见 [manifest.json](extension-v2.0/manifest.json) 与 [CHANGELOG.md](CHANGELOG.md)）。
+当前 `extension-v2.0` 版本：**2.0.9**（见 [manifest.json](extension-v2.0/manifest.json) 与 [CHANGELOG.md](CHANGELOG.md)）。
 
 ## 安装
 
@@ -413,7 +413,7 @@ BOSS 的 `search/joblist.json` 吃的是页面加载时发的令牌，**同一�
 
 完整版本变更见 [CHANGELOG.md](CHANGELOG.md)，版本号与仓库 tag / Releases 一一对应。
 
-当前 `extension-v2.0` 版本：**2.0.8**（2026-11-21）
+当前 `extension-v2.0` 版本：**2.0.9**（2026-11-23）
 
 - 精排凑够 20 条合适岗再停；批内达到目标即停拿新岗
 - 前程粗筛翻页攒池（最多 60）再精排

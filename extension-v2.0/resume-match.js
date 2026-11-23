@@ -904,12 +904,13 @@ window.ResumeMatch = (() => {
 
   // 待投 = 既没投过、也没被忽略。三端入口和侧边栏守卫都走这一份，
   // 免得 BOSS 用 encryptId、智联/前程用 jobId 的差异在别处再写一遍。
-  function pendingJobsOf(jobs, appliedSet, ignoredSet) {
+  function pendingJobsOf(jobs, appliedSet, ignoredSet, profile) {
     const applied = appliedSet instanceof Set ? appliedSet : new Set();
     const ignored = ignoredSet instanceof Set ? ignoredSet : new Set();
     return [].concat(jobs || []).filter((j) => {
       const id = jobAppliedId(j);
-      return !!id && !applied.has(id) && !ignored.has(id);
+      return !!id && !applied.has(id) && !ignored.has(id)
+        && (!profile || !profile.city || (!!String(j.cityName || '').trim() && !cityMismatch(profile, j)));
     });
   }
 
@@ -1068,7 +1069,7 @@ window.ResumeMatch = (() => {
     if (r.jdText) job.jdText = r.jdText;
     if (r.skills && r.skills.length) job.skills = uniq(job.skills.concat(r.skills));
     if (r.name && !job.name) job.name = r.name;
-    if (r.cityName && !job.cityName) job.cityName = r.cityName;
+    if (r.cityName) job.cityName = r.cityName;
     const hasJd = !!(job.jdText && job.jdText.length >= 40);
     const dinfo = directionInfoForRefine(job, profile);
     const block = extraWhy(job, profile)
@@ -1318,11 +1319,12 @@ window.ResumeMatch = (() => {
   }
 
   function cityMismatch(profile, job) {
-    if (!profile.city) return false;
-    if (profile.cityCode) return false;
-    const c = String(job.cityName || '');
-    if (!c) return false;
-    return !c.includes(profile.city) && !profile.city.includes(c.replace(/市$/, ''));
+    const city = String(profile.city || '').trim().replace(/市$/, '');
+    const c = String(job.cityName || '').trim();
+    // 搜索接口可能返回跨城推荐，城市编码只用于请求，不能代替本地校验。
+    // 缺地点的列表项留给详情补全；投递入口要求有明确的匹配城市。
+    if (!city || !c) return false;
+    return !c.startsWith(city);
   }
 
   function scoreList(job, profile) {
@@ -1369,10 +1371,7 @@ window.ResumeMatch = (() => {
   }
 
   function jdCityMismatch(profile, cityName) {
-    if (!profile.city || !cityName) return false;
-    const c = String(cityName).replace(/市/g, '');
-    if (c.includes(profile.city) || profile.city.includes(c)) return false;
-    return Object.keys(CITY_CODE).some(x => x !== profile.city && c.includes(x));
+    return cityMismatch(profile, { cityName });
   }
 
   function mapApiJob(j) {
